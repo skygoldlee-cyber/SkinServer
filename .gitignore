@@ -1,0 +1,25 @@
+# secrets / env (박스별 · 커밋 금지)
+deploy/env/.env
+deploy/env/.env.images
+deploy/env/.env.images.lock
+deploy/env/remote.env
+deploy/nginx/.htpasswd
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# node / frontend
+node_modules/
+apps/*/.next/
+apps/*/dist/
+apps/*/build/
+
+# runtime data
+storage/
+*.tgz
+
+# os
+.DS_Store

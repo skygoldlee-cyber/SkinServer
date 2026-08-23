@@ -1,0 +1,12 @@
+# 테스트/CI 공통 의존성 (단위 + 통합) — 핀 고정(재현성). 상류 breaking change 차단.
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.18
+pydantic==2.10.4
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+psycopg[binary,pool]==3.3.4
+psycopg-pool==3.3.1
+pyjwt==2.10.1
+httpx==0.28.1
+pytest==8.3.4

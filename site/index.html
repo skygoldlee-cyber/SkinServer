@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkinLens 서버 문서세트 — 한눈에 보기</title>
+<meta name="description" content="SkinLens 서버 문서세트 개요: 구성·읽는 순서·런타임 아키텍처·감사(P0/P1/P2)를 한 화면에서.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0E1B24; --ink-soft:#42555F; --faint:#6E828C;
+    --paper:#EDF1F2; --surface:#FFFFFF; --line:#D3DCDF; --line-soft:#E4EAEC;
+    --teal:#0E8C86; --teal-deep:#0A605C; --teal-tint:#E0EFEE;
+    --p0:#CF4436; --p0-tint:#FBE8E5;
+    --p1:#B8820A; --p1-tint:#F8EFD6;
+    --p2:#5C7C8A; --p2-tint:#E8EEF0;
+    --font-body:'IBM Plex Sans KR',system-ui,-apple-system,sans-serif;
+    --font-disp:'Space Grotesk','IBM Plex Sans KR',system-ui,sans-serif;
+    --font-mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --maxw:1080px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--font-body); font-weight:400; line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:inherit}
+  .wrap{max-width:var(--maxw); margin:0 auto; padding:0 24px}
+  .mono{font-family:var(--font-mono); font-size:.82em; letter-spacing:-.01em}
+  .eyebrow{
+    font-family:var(--font-disp); font-weight:600; font-size:.72rem;
+    letter-spacing:.22em; text-transform:uppercase; color:var(--teal-deep);
+  }
+
+  /* ---- top bar ---- */
+  header.bar{
+    position:sticky; top:0; z-index:20;
+    background:rgba(237,241,242,.86); backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line);
+  }
+  .bar .wrap{display:flex; align-items:center; gap:18px; height:56px}
+  .brand{display:flex; align-items:center; gap:10px; font-weight:600; letter-spacing:-.01em}
+  .dot{width:11px; height:11px; border-radius:50%; background:var(--teal);
+       box-shadow:0 0 0 4px var(--teal-tint)}
+  .bar nav{margin-left:auto; display:flex; gap:22px; font-size:.9rem}
+  .bar nav a{color:var(--ink-soft); text-decoration:none; padding:4px 2px}
+  .bar nav a:hover{color:var(--teal-deep)}
+  @media(max-width:640px){ .bar nav{display:none} }
+
+  /* ---- hero ---- */
+  .hero{padding:64px 0 30px}
+  .hero h1{
+    font-family:var(--font-disp); font-weight:700; letter-spacing:-.02em;
+    font-size:clamp(2.1rem,5.4vw,3.4rem); line-height:1.05; margin:.5rem 0 0;
+  }
+  .hero .lead{max-width:60ch; margin:18px 0 0; color:var(--ink-soft); font-size:1.06rem}
+  .hero .lead b{color:var(--ink); font-weight:600}
+
+  /* reading path stepper */
+  .path{display:flex; flex-wrap:wrap; gap:8px; margin:30px 0 0}
+  .step{
+    display:flex; align-items:center; gap:9px; background:var(--surface);
+    border:1px solid var(--line); border-radius:999px; padding:7px 13px 7px 8px;
+    font-size:.9rem; font-weight:500;
+  }
+  .step .r{
+    width:22px; height:22px; border-radius:50%; display:grid; place-items:center;
+    background:var(--ink); color:#fff; font-family:var(--font-disp); font-size:.72rem; font-weight:600;
+  }
+  .step em{font-style:normal; color:var(--faint); font-family:var(--font-mono); font-size:.7rem}
+  .step.audit{border-color:var(--teal); background:var(--teal-tint)}
+  .step.audit .r{background:var(--teal)}
+
+  /* section frame */
+  section{padding:52px 0}
+  .sec-head{display:flex; align-items:baseline; gap:14px; margin-bottom:26px}
+  .sec-head h2{font-family:var(--font-disp); font-weight:600; letter-spacing:-.01em;
+    font-size:1.5rem; margin:0}
+  .sec-head .n{font-family:var(--font-mono); color:var(--teal-deep); font-size:.9rem}
+  .sec-head p{margin:0 0 0 auto; color:var(--faint); font-size:.9rem; max-width:34ch; text-align:right}
+  @media(max-width:640px){ .sec-head p{display:none} }
+
+  /* ---- architecture signature ---- */
+  .arch{
+    background:var(--surface); border:1px solid var(--line); border-radius:16px;
+    padding:22px; overflow:hidden;
+  }
+  .arch svg{display:block; width:100%; height:auto}
+  .arch .legend{
+    display:flex; flex-wrap:wrap; gap:18px 26px; margin-top:16px; padding-top:16px;
+    border-top:1px solid var(--line-soft); font-size:.88rem; color:var(--ink-soft);
+  }
+  .arch .legend b{color:var(--ink); font-weight:600}
+  .arch .legend div{max-width:30ch}
+  .scanline{ animation:sweep 4.6s ease-in-out infinite; }
+  @keyframes sweep{
+    0%,100%{transform:translateX(0); opacity:0}
+    8%{opacity:.9} 50%{opacity:.9}
+    92%{transform:translateX(812px); opacity:0}
+  }
+
+  /* ---- parts grid ---- */
+  .grid{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
+  @media(max-width:820px){ .grid{grid-template-columns:repeat(2,1fr)} }
+  @media(max-width:520px){ .grid{grid-template-columns:1fr} }
+  .card{
+    background:var(--surface); border:1px solid var(--line); border-radius:14px;
+    padding:18px 18px 16px; display:flex; flex-direction:column; gap:9px;
+    transition:transform .16s ease, box-shadow .16s ease, border-color .16s ease;
+  }
+  .card:hover{transform:translateY(-3px); box-shadow:0 10px 26px -14px rgba(14,27,36,.32);
+    border-color:var(--teal)}
+  .card .top{display:flex; align-items:center; gap:10px}
+  .chip{font-family:var(--font-mono); font-size:.72rem; color:var(--ink-soft);
+    background:var(--paper); border:1px solid var(--line); border-radius:6px; padding:2px 7px}
+  .rank{margin-left:auto; width:24px; height:24px; border-radius:50%;
+    display:grid; place-items:center; font-family:var(--font-disp); font-weight:600;
+    font-size:.74rem; color:var(--teal-deep); background:var(--teal-tint); border:1px solid #BFE0DD}
+  .card h3{margin:2px 0 0; font-size:1.06rem; font-weight:600; letter-spacing:-.01em}
+  .card p{margin:0; color:var(--ink-soft); font-size:.92rem}
+  .card .path-note{margin-top:auto; padding-top:8px; color:var(--faint)}
+  a.path-note{text-decoration:none; color:var(--teal-deep)!important; transition:color .12s}
+  a.path-note:hover{text-decoration:underline}
+  .card.meta{background:linear-gradient(180deg,#fff, #F7FAFA)}
+  .card.audit{border-color:var(--teal)}
+  .card.audit .rank{background:var(--teal); color:#fff; border-color:var(--teal)}
+
+  /* ---- audit board ---- */
+  .board-intro{background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--teal);
+    border-radius:12px; padding:16px 18px; margin-bottom:26px; color:var(--ink-soft)}
+  .board-intro b{color:var(--ink)}
+  .gaps{display:flex; flex-wrap:wrap; gap:8px; margin-top:10px}
+  .gaps span{font-size:.82rem; font-weight:600; background:var(--p0-tint); color:var(--p0);
+    border-radius:8px; padding:4px 10px}
+
+  .p0grid{display:grid; grid-template-columns:repeat(2,1fr); gap:14px}
+  @media(max-width:640px){ .p0grid{grid-template-columns:1fr} }
+  .p0{background:var(--surface); border:1px solid var(--line); border-top:3px solid var(--p0);
+    border-radius:12px; padding:16px}
+  .p0 .k{display:flex; align-items:center; gap:8px}
+  .tag{font-family:var(--font-disp); font-weight:700; font-size:.72rem; letter-spacing:.04em;
+    padding:3px 8px; border-radius:6px}
+  .tag.t0{background:var(--p0-tint); color:var(--p0)}
+  .tag.t1{background:var(--p1-tint); color:var(--p1)}
+  .tag.t2{background:var(--p2-tint); color:var(--p2)}
+  .p0 h4{margin:10px 0 4px; font-size:1rem; font-weight:600}
+  .p0 p{margin:0; color:var(--ink-soft); font-size:.88rem}
+  .status{display:inline-flex; align-items:center; gap:6px; margin-top:10px;
+    font-size:.78rem; font-weight:600; color:var(--teal-deep)}
+  .status::before{content:""; width:8px; height:8px; border-radius:50%; background:var(--teal)}
+  .status.decide{color:var(--p1)} .status.decide::before{background:var(--p1)}
+
+  .plist{margin-top:22px; display:grid; grid-template-columns:1fr 1fr; gap:10px 22px}
+  @media(max-width:640px){ .plist{grid-template-columns:1fr} }
+  .prow{display:flex; align-items:flex-start; gap:10px; padding:9px 0; border-bottom:1px solid var(--line-soft)}
+  .prow .lbl{flex:1; font-size:.92rem}
+  .prow .lbl small{display:block; color:var(--faint); font-size:.78rem; font-weight:400}
+  .prow.done .lbl{font-weight:600}
+  .badge-done{font-size:.7rem; font-weight:700; color:var(--teal-deep); background:var(--teal-tint);
+    border-radius:6px; padding:2px 7px; white-space:nowrap}
+  .badge-next{font-size:.7rem; font-weight:600; color:var(--faint); background:var(--paper);
+    border:1px solid var(--line); border-radius:6px; padding:2px 7px; white-space:nowrap}
+
+  .p2wrap{margin-top:26px}
+  .p2wrap h4{font-size:.9rem; margin:0 0 10px; color:var(--ink-soft); font-weight:600}
+  .chips{display:flex; flex-wrap:wrap; gap:8px}
+  .chips span{font-size:.82rem; color:var(--p2); background:var(--p2-tint);
+    border:1px solid #D3DEE2; border-radius:999px; padding:5px 12px}
+
+  /* solid foundations */
+  .solid{margin-top:30px; background:var(--ink); color:#DCE6E8; border-radius:14px; padding:20px 22px}
+  .solid .eyebrow{color:#6FC9C3}
+  .solid p{margin:8px 0 0; font-size:.94rem; line-height:1.65}
+  .solid .keys{display:flex; flex-wrap:wrap; gap:8px; margin-top:14px}
+  .solid .keys span{font-family:var(--font-mono); font-size:.76rem; color:#Bfeee9;
+    border:1px solid #274248; border-radius:7px; padding:4px 9px}
+
+  footer{border-top:1px solid var(--line); padding:34px 0 60px; color:var(--faint); font-size:.88rem}
+  footer .split{display:flex; flex-wrap:wrap; gap:10px 30px; margin-bottom:14px}
+  footer .split div b{color:var(--ink)}
+  footer .split .mono{color:var(--teal-deep)}
+
+  @media (prefers-reduced-motion: reduce){
+    .scanline{animation:none; opacity:0}
+    .card{transition:none}
+    html{scroll-behavior:auto}
+  }
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <div class="wrap">
+    <div class="brand"><span class="dot"></span> SkinLens · 서버 문서세트</div>
+    <nav>
+      <a href="#parts">구성</a>
+      <a href="#arch">아키텍처</a>
+      <a href="#audit">감사</a>
+    </nav>
+  </div>
+</header>
+
+<!-- HERO -->
+<div class="wrap hero">
+  <div class="eyebrow">Server documentation set · 한눈에 보기</div>
+  <h1>피부 사진 한 장이<br>거쳐 가는 서버의 지도</h1>
+  <p class="lead">
+    WSL2에서 세운 서버를 SkinLens 세 표면(분석·처방·웹)에 맞춰 검토하고,
+    구동 가능한 compose로 구현해 CD로 배포하고 3-Tier(Vercel·Supabase·AI Server)로 재편하기까지 —
+    <b>구축 → 검토 → 구현 → 배포 → 감사</b>의 여정을 9개 파트로 정리한 세트입니다.
+    아래 순서대로 보면 큰 그림이 그대로 이어집니다.
+  </p>
+
+  <div class="path" aria-label="읽는 순서">
+    <div class="step"><span class="r">1</span> 이야기 <em>04</em></div>
+    <div class="step"><span class="r">2</span> 구축 <em>01</em></div>
+    <div class="step"><span class="r">3</span> 적합성검토 <em>02</em></div>
+    <div class="step"><span class="r">4</span> 구현·스캐폴드 <em>03</em></div>
+    <div class="step"><span class="r">5</span> 3-Tier 이전 <em>NEW</em></div>
+    <div class="step"><span class="r">6</span> CD 배포 <em>05</em></div>
+    <div class="step"><span class="r">7</span> 체크리스트 <em>06</em></div>
+    <div class="step"><span class="r">8</span> 학습 로드맵 <em>07</em></div>
+    <div class="step audit"><span class="r">9</span> 최종 리뷰 <em>08</em></div>
+  </div>
+</div>
+
+<!-- ARCHITECTURE -->
+<section id="arch">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="n">A</span><h2>런타임 아키텍처</h2>
+      <p>사진과 설문이 폐쇄망 엔진을 지나 결과가 되기까지</p>
+    </div>
+
+    <div class="arch">
+      <svg viewBox="0 0 980 380" role="img" aria-label="SkinLens 요청 흐름 다이어그램: 인터넷에서 Caddy, nginx를 지나 정적 PWA 앱 셸(webapp)과 gateway·worker로 갈라지고, 폐쇄망 엔진과 데이터 계층으로 이어짐">
+        <defs>
+          <linearGradient id="scan" x1="0" x2="1" y1="0" y2="0">
+            <stop offset="0" stop-color="#0E8C86" stop-opacity="0"/>
+            <stop offset="0.5" stop-color="#0E8C86" stop-opacity="0.5"/>
+            <stop offset="1" stop-color="#0E8C86" stop-opacity="0"/>
+          </linearGradient>
+          <marker id="arw" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#8AA0AA"/>
+          </marker>
+          <style>
+            .box{fill:#fff; stroke:#0E8C86; stroke-width:1.5; rx:10}
+            .box-ink{fill:#0E1B24}
+            .t{font-family:'IBM Plex Sans KR',sans-serif; font-size:14px; fill:#0E1B24; font-weight:600}
+            .t-w{font-family:'IBM Plex Sans KR',sans-serif; font-size:14px; fill:#fff; font-weight:600}
+            .s{font-family:'IBM Plex Mono',monospace; font-size:10.5px; fill:#6E828C}
+            .s-w{font-family:'IBM Plex Mono',monospace; font-size:10.5px; fill:#9FC7C3}
+            .flow{stroke:#8AA0AA; stroke-width:1.6; fill:none}
+            .lane{font-family:'IBM Plex Sans KR',sans-serif; font-size:11px; fill:#0A605C; font-weight:600}
+          </style>
+        </defs>
+
+        <!-- request lane -->
+        <text x="16" y="30" class="lane">요청 경로</text>
+
+        <!-- Internet -->
+        <circle cx="60" cy="86" r="26" fill="#EDF1F2" stroke="#C3D0D4" stroke-width="1.5"/>
+        <text x="60" y="90" text-anchor="middle" class="t" style="font-size:12px">인터넷</text>
+
+        <line x1="88" y1="86" x2="126" y2="86" class="flow" marker-end="url(#arw)"/>
+
+        <!-- Caddy -->
+        <rect x="128" y="58" width="108" height="56" rx="10" fill="#0E8C86"/>
+        <text x="182" y="82" text-anchor="middle" class="t-w">Caddy</text>
+        <text x="182" y="99" text-anchor="middle" class="s-w">TLS · HSTS</text>
+
+        <line x1="236" y1="86" x2="272" y2="86" class="flow" marker-end="url(#arw)"/>
+
+        <!-- nginx -->
+        <rect x="274" y="58" width="116" height="56" rx="10" class="box"/>
+        <text x="332" y="82" text-anchor="middle" class="t">nginx</text>
+        <text x="332" y="99" text-anchor="middle" class="s">라우팅·레이트리밋</text>
+
+        <line x1="390" y1="86" x2="426" y2="72" class="flow" marker-end="url(#arw)"/>
+        <line x1="390" y1="86" x2="426" y2="150" class="flow" marker-end="url(#arw)"/>
+
+        <!-- webapp (PWA 앱 셸) — nginx 가 app. 호스트에서 정적 앱 셸을 서빙 -->
+        <line x1="332" y1="114" x2="332" y2="140" class="flow" marker-end="url(#arw)"/>
+        <rect x="274" y="140" width="116" height="52" rx="10" class="box"/>
+        <text x="332" y="162" text-anchor="middle" class="t">webapp</text>
+        <text x="332" y="179" text-anchor="middle" class="s">PWA 앱 셸 · SW</text>
+        <text x="332" y="207" text-anchor="middle" class="s" style="font-size:9.5px">app. · /=셸 · /api→gateway</text>
+
+        <!-- upload payload: photo + survey (+pcr) enter together at gateway -->
+        <text x="410" y="41" text-anchor="middle" class="s">POST /analyze · 사진 + 설문(+PCR)</text>
+
+        <!-- gateway -->
+        <rect x="428" y="46" width="120" height="52" rx="10" class="box"/>
+        <text x="488" y="68" text-anchor="middle" class="t">gateway</text>
+        <text x="488" y="85" text-anchor="middle" class="s">API 진입</text>
+
+        <!-- worker -->
+        <rect x="428" y="128" width="120" height="52" rx="10" class="box"/>
+        <text x="488" y="150" text-anchor="middle" class="t">worker</text>
+        <text x="488" y="167" text-anchor="middle" class="s">비동기 작업</text>
+
+        <!-- enginenet closed box -->
+        <rect x="596" y="30" width="250" height="168" rx="14" fill="#F4FAF9" stroke="#0E8C86" stroke-width="1.6" stroke-dasharray="6 5"/>
+        <text x="612" y="52" class="lane">enginenet · 폐쇄망 (egress 차단)</text>
+
+        <rect x="616" y="66" width="210" height="52" rx="9" class="box"/>
+        <text x="628" y="88" class="t" style="font-size:13px">engine-analysis</text>
+        <text x="628" y="105" class="s">피부 분석 · GPU</text>
+        <rect x="782" y="72" width="34" height="16" rx="4" fill="#0E1B24"/>
+        <text x="799" y="84" text-anchor="middle" class="t-w" style="font-size:9.5px">GPU</text>
+
+        <rect x="616" y="128" width="210" height="52" rx="9" class="box"/>
+        <text x="628" y="150" class="t" style="font-size:13px">engine-prescription</text>
+        <text x="628" y="167" class="s">처방 · 규칙 기반</text>
+        <rect x="782" y="134" width="34" height="16" rx="4" fill="#5C7C8A"/>
+        <text x="799" y="146" text-anchor="middle" class="t-w" style="font-size:9.5px">CPU</text>
+
+        <!-- worker -> engines: analysis(사진) 먼저, 이어 prescription(분석지표+설문) -->
+        <line x1="548" y1="146" x2="612" y2="118" class="flow" marker-end="url(#arw)"/>
+        <line x1="548" y1="158" x2="612" y2="150" class="flow" marker-end="url(#arw)"/>
+        <text x="628" y="192" class="s" style="font-size:9.5px">↳ 분석지표 + 설문 병합(민감성·복합성)</text>
+
+        <!-- scan line sweep -->
+        <rect class="scanline" x="128" y="30" width="34" height="168" fill="url(#scan)"/>
+
+        <!-- data lane -->
+        <line x1="16" y1="238" x2="964" y2="238" stroke="#E4EAEC" stroke-width="1"/>
+        <text x="16" y="262" class="lane">데이터 계층</text>
+
+        <rect x="128" y="278" width="150" height="56" rx="10" fill="#0E1B24"/>
+        <text x="203" y="302" text-anchor="middle" class="t-w">Supabase</text>
+        <text x="203" y="319" text-anchor="middle" class="s-w">영구 · 이미지 창고</text>
+
+        <rect x="300" y="278" width="150" height="56" rx="10" class="box"/>
+        <text x="375" y="302" text-anchor="middle" class="t">Redis</text>
+        <text x="375" y="319" text-anchor="middle" class="s">빠른 신호 (Phase 3 예정)</text>
+
+        <rect x="472" y="278" width="182" height="56" rx="10" class="box"/>
+        <text x="563" y="302" text-anchor="middle" class="t">Postgres Job Queue</text>
+        <text x="563" y="319" text-anchor="middle" class="s">작업 상태의 원장</text>
+
+        <!-- async annotation -->
+        <rect x="676" y="270" width="288" height="72" rx="10" fill="#EDF1F2" stroke="#C3D0D4" stroke-width="1.2"/>
+        <text x="692" y="292" class="t" style="font-size:12.5px">비동기 Job</text>
+        <text x="692" y="311" class="s" style="font-size:11px">업로드 → job_id 즉시 반환</text>
+        <text x="692" y="327" class="s" style="font-size:11px">→ 백그라운드 분석 → 결과 저장 → 조회</text>
+
+        <!-- link gateway/worker to data -->
+        <line x1="488" y1="180" x2="360" y2="272" class="flow" marker-end="url(#arw)"/>
+        <line x1="488" y1="98" x2="203" y2="272" class="flow" marker-end="url(#arw)"/>
+      </svg>
+
+      <div class="legend">
+        <div><b>사진 + 설문 동반</b> — 업로드 한 번(<span class="mono">POST /analyze</span>)에 사진과 자가보고 설문이 함께 접수돼 job에 실립니다. 설문은 분석 엔진엔 가지 않고, 사진으로 얻기 어려운 지표(민감성·복합성)를 <b>처방 단계</b>에서 채웁니다.</div>
+        <div><b>신뢰 경계</b> — 엔진은 폐쇄망(enginenet)에 두고 외부 egress를 차단, Supabase 열쇠도 주지 않습니다.</div>
+        <div><b>비동기 처리</b> — 오래 걸리는 분석은 job_id를 즉시 돌려주고 백그라운드로. 504로 끊기지 않습니다.</div>
+        <div><b>스테이징 ≠ 운영</b> — 스테이징=WSL2(로컬 Postgres), 운영=VPS(Supabase). 이미지는 GHCR→서버 pull, self-hosted 러너가 헬스게이트+태그 롤백.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PARTS -->
+<section id="parts">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="n">B</span><h2>세트 구성 · 9개 파트</h2>
+      <p>폴더 번호는 산출물 계보, 원 번호는 읽는 순서</p>
+    </div>
+
+    <div class="grid">
+      <div class="card meta">
+        <div class="top"><span class="chip">00</span><span class="chip mono">INDEX · MANIFEST</span></div>
+        <h3>지도 · 전체 목록</h3>
+        <p>읽는 순서(README)와 모든 파일 한 줄 설명(MANIFEST). 여기서 시작해 길을 잡습니다.</p>
+        <a class="path-note mono" href="../docs/README.md">../docs/README.md →</a>
+      </div>
+
+      <div class="card">
+        <div class="top"><span class="chip">04</span><span class="rank">1</span></div>
+        <h3>이야기</h3>
+        <p>이야기체 개념 요약 — 전체 여정(overview) + 구축·하드닝·운영·백업·이관·배포·기동·3-Tier 이전·프로젝트 분석 심화 9편. 세부로 들어가기 전 먼저 읽는 큰 그림.</p>
+        <a class="path-note mono" href="../docs/stories/">../docs/stories/ →</a>
+      </div>
+
+      <div class="card">
+        <div class="top"><span class="chip">01</span><span class="rank">2</span></div>
+        <h3>서버 구축 (v3)</h3>
+        <p>기반 — WSL2 Ubuntu 서버 구축·검증·이관·하드닝(3차 보완 반영).</p>
+        <a class="path-note mono" href="../docs/server-setup/">../docs/server-setup/ →</a>
+      </div>
+
+      <div class="card">
+        <div class="top"><span class="chip">02</span><span class="rank">3</span></div>
+        <h3>적합성 검토</h3>
+        <p>다리 — SkinLens 4표면(홈·개발자·앱PWA·API)에 이 기반이 맞는가, 목표 토폴로지, 그리고 5개 구조 장단점 비교(3-Tier 선택 근거).</p>
+        <a class="path-note mono" href="../docs/architecture/SkinLens_서버구성_적합성_검토.md">../docs/architecture/…적합성_검토.md →</a>
+      </div>
+
+      <div class="card">
+        <div class="top"><span class="chip">03</span><span class="rank">4</span></div>
+        <h3>webstack 스캐폴드</h3>
+        <p>구현 — 부록 B·C가 실물로 전개됨: compose·nginx + 서비스·정적앱.</p>
+        <a class="path-note mono" href="../deploy/compose/">../deploy/·../services/·../apps/ →</a>
+      </div>
+
+      <div class="card">
+        <div class="top"><span class="chip">3T</span><span class="rank">5</span></div>
+        <h3>3-Tier 이전 (진행 축)</h3>
+        <p>재편 — Vercel(웹)·Supabase(데이터)·AI Server(엔진) 3분할 설계 정본 + Phase 1~6 작업계획·실행 런북.</p>
+        <a class="path-note mono" href="../docs/architecture/04_3Tier_Vercel_Supabase_AIServer_설계.md">../docs/architecture/04·05_3Tier →</a>
+      </div>
+
+      <div class="card">
+        <div class="top"><span class="chip">05</span><span class="rank">6</span></div>
+        <h3>CD 배포</h3>
+        <p>배포 — 완결형 ops 레포 + 워크플로. 레포→러너→헬스체크→손님상.</p>
+        <a class="path-note mono" href="../.github/workflows/">../.github/workflows/ · ../deploy/ →</a>
+      </div>
+
+      <div class="card">
+        <div class="top"><span class="chip">06</span><span class="rank">7</span></div>
+        <h3>운영·배포 체크리스트</h3>
+        <p>구축 이후 배포·운영에서 실제로 챙길 것(세부 문서 앵커 링크).</p>
+        <a class="path-note mono" href="../docs/operations/06_운영·배포_체크리스트.md">../docs/operations/06_…체크리스트.md →</a>
+      </div>
+
+      <div class="card">
+        <div class="top"><span class="chip">07</span><span class="rank">8</span></div>
+        <h3>학습 로드맵</h3>
+        <p>학습 의존성 순서 — 단계별 문서·선수지식·완료 기준.</p>
+        <a class="path-note mono" href="../docs/operations/07_학습_로드맵.md">../docs/operations/07_학습_로드맵.md →</a>
+      </div>
+
+      <div class="card audit">
+        <div class="top"><span class="chip">08</span><span class="rank">9</span></div>
+        <h3>최종 리뷰 (감사)</h3>
+        <p>실제 설정·코드 기준 감사 + P0/P1 반영 노트 + 롤백 런북.</p>
+        <a class="path-note mono" href="../docs/architecture/">../docs/architecture/ →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- AUDIT -->
+<section id="audit">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="n">C</span><h2>감사 현황 — P0 / P1 / P2</h2>
+      <p>개념은 성숙, 남은 건 "산문 → 배선"</p>
+    </div>
+
+    <div class="board-intro">
+      전체 그림은 <b>일관되고 성숙</b>합니다. 개념과 실제 산출물 사이의 <b>가장 큰 4간극</b>이
+      실사용자 오픈 전 닫아야 할 지점이며, 이 세트는 그 <b>P0 4건 + P1(flock)</b>을 이미 파일로 반영했습니다.
+      <div class="gaps">
+        <span>GPU 미배선</span><span>마이그레이션 롤백</span><span>TLS</span><span>RLS/보존</span>
+      </div>
+    </div>
+
+    <div class="p0grid">
+      <div class="p0">
+        <div class="k"><span class="tag t0">P0</span></div>
+        <h4>엔드투엔드 TLS</h4>
+        <p>443·HSTS·basic-auth를 TLS 뒤로. 피부 사진 평문 전송 차단 — 실사용 오픈 게이트.</p>
+        <span class="status">Caddy 오버레이로 반영</span>
+      </div>
+      <div class="p0">
+        <div class="k"><span class="tag t0">P0</span></div>
+        <h4>Supabase RLS + Storage 정책</h4>
+        <p>교차 사용자 접근 차단을 코드로 담보. 폴더 첫 조각 = 소유자.</p>
+        <span class="status">0001 정책 SQL로 반영</span>
+      </div>
+      <div class="p0">
+        <div class="k"><span class="tag t0">P0</span></div>
+        <h4>GPU 정책 확정 + 배선</h4>
+        <p>현재 동작(CPU) ≠ 문서(GPU). 엔진 GPU 예약 + 동시성 직렬화.</p>
+        <span class="status decide">오버레이 제공 · 호스트 결정 필요</span>
+      </div>
+      <div class="p0">
+        <div class="k"><span class="tag t0">P0</span></div>
+        <h4>마이그레이션 vs 롤백</h4>
+        <p>expand-contract + "코드≠스키마" 런북. 롤백해도 안 죽게.</p>
+        <span class="status">배선 + 런북으로 반영</span>
+      </div>
+    </div>
+
+    <div class="plist">
+      <div class="prow done">
+        <div class="lbl">deploy.sh에 flock<small>동시 엔진 배포 레이스 차단</small></div>
+        <span class="badge-done">이번 반영</span>
+      </div>
+      <div class="prow">
+        <div class="lbl">이미지/PII 보존·자동삭제 + presigned TTL<small>PIPA 운영 담보</small></div>
+        <span class="badge-next">후속 P1</span>
+      </div>
+      <div class="prow">
+        <div class="lbl">운영 승인 게이트 필수화 + 러너 하드닝<small>운영 호스트 위 코드 실행 리스크</small></div>
+        <span class="badge-next">후속 P1</span>
+      </div>
+      <div class="prow">
+        <div class="lbl">워커 신선도 헬스체크<small>잡 조용한 적체 방지</small></div>
+        <span class="badge-next">후속 P1</span>
+      </div>
+      <div class="prow">
+        <div class="lbl">.htpasswd 커밋 중단·bcrypt·dev IP 화이트리스트<small>평문 basic-auth 제거</small></div>
+        <span class="badge-next">후속 P1</span>
+      </div>
+    </div>
+
+    <div class="p2wrap">
+      <h4>P2 · 심층 방어 / 다듬기</h4>
+      <div class="chips">
+        <span>CSP 헤더 + 업로드 rate limit</span>
+        <span>gateway를 enginenet에서 제외</span>
+        <span>최초 부팅 이미지 sha 고정</span>
+        <span>이미지 서명(cosign)·SBOM</span>
+        <span>DATABASE_URL fail-fast</span>
+        <span>정적 사이트 엣지 nginx 통합</span>
+      </div>
+    </div>
+
+    <div class="solid">
+      <div class="eyebrow">이미 잘 잡힌 것</div>
+      <p>WSL 스테이징 → VPS 운영 → GHCR → self-hosted 러너 → 헬스 게이트 → 태그 롤백,
+         enginenet 폐쇄망, Postgres 원장(Redis 신호 분리는 Phase 3 예정), 비동기 Job까지 하나의 구조로 연결돼 있습니다.</p>
+      <div class="keys">
+        <span>read_only</span><span>cap_drop</span><span>no-new-privileges</span>
+        <span>enginenet internal</span><span>no pull_request trigger</span><span>Postgres 원장</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="split">
+      <div><b>문서(왜/무엇)</b> <span class="mono">→ ../docs/architecture/</span></div>
+      <div><b>우선순위·리스크</b> <span class="mono">→ ../docs/roadmap/09_구현우선순위_배포구조_리스크정리.md</span></div>
+      <div><b>배선(어떻게)</b> <span class="mono">→ ../deploy/ · ../.github/workflows/</span></div>
+      <div><b>먼저 읽기</b> <span class="mono">→ ../docs/stories/ · ../docs/README.md</span></div>
+    </div>
+    칩의 번호는 산출물 계보(옛 문서세트 번호)이고, 실제 파일은 현재 monorepo 경로(docs/·deploy/·services/·apps/)에 있습니다. 읽는 순서는 상단 스텝(1→9) · 2026-08
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+# =============================================================
+# sl — SkinLens 통합 기동 CLI
+#
+#   모든 환경(dev/staging/prod)에 같은 동사를 제공한다.
+#   사용자는 compose 파일 조합·env-file 조합을 외울 필요가 없다.
+#
+# 사용:
+#   sl up [dev|staging|prod]       스택 기동 (dev는 --build)
+#   sl down [env]                  스택 정지
+#   sl logs [env] [service]        로그 팔로우
+#   sl ps [env]                    컨테이너 상태
+#   sl doctor [env]                기동 전 자가진단
+#   sl init [env]                  최초 설정 (env 파일 생성·검증·안내)
+#   sl deploy <svc> <image> [--env staging|prod] [--pull]
+#                                  개별 서비스 배포 (deploy.sh 래핑)
+#
+# env 생략 시: 실행 중인 컨테이너로 추론하고, 못 하면 대화형으로 묻는다.
+# =============================================================
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"                 # 리포 루트
+COMPOSE_DIR="$ROOT/deploy/compose"
+ENV_DIR="$ROOT/deploy/env"
+
+# ---- 출력 헬퍼 -------------------------------------------------------------
+c_red()  { printf '\033[31m%s\033[0m\n' "$*"; }
+c_grn()  { printf '\033[32m%s\033[0m\n' "$*"; }
+c_ylw()  { printf '\033[33m%s\033[0m\n' "$*"; }
+c_dim()  { printf '\033[2m%s\033[0m\n' "$*"; }
+die()    { c_red "✗ $*" >&2; exit 1; }
+info()   { c_dim "· $*"; }
+ok()     { c_grn "✓ $*"; }
+warn()   { c_ylw "! $*"; }
+
+# ---- compose 조합 결정 ------------------------------------------------------
+# 사용: compose_cmd <env>  → stdout으로 docker compose 인자 배열을 남기기 위해
+# 전역 배열 COMPOSE 를 채운다.
+build_compose() {
+  local env="$1"
+  COMPOSE=(docker compose --env-file "$ENV_DIR/.env")
+  COMPOSE+=(-f "$COMPOSE_DIR/compose.base.yml")
+  case "$env" in
+    dev)
+      COMPOSE+=(-f "$COMPOSE_DIR/compose.dev.yml")
+      ;;
+    staging)
+      [ -f "$ENV_DIR/.env.images" ] || die "missing $ENV_DIR/.env.images — 'sl init staging' 또는 예시 복사: cp deploy/env/.env.images.example deploy/env/.env.images"
+      COMPOSE+=(--env-file "$ENV_DIR/.env.images")
+      COMPOSE+=(-f "$COMPOSE_DIR/compose.staging.yml")
+      ;;
+    prod|production)
+      [ -f "$ENV_DIR/.env.images" ] || die "missing $ENV_DIR/.env.images — 'sl init prod' 또는 예시 복사: cp deploy/env/.env.images.example deploy/env/.env.images"
+      COMPOSE+=(--env-file "$ENV_DIR/.env.images")
+      COMPOSE+=(-f "$COMPOSE_DIR/compose.prod.yml")
+      [ -f "$COMPOSE_DIR/compose.tls.yml" ] && COMPOSE+=(-f "$COMPOSE_DIR/compose.tls.yml")
+      ;;
+    *) die "unknown env: $env (dev|staging|prod)";;
+  esac
+  # GPU 오버레이는 존재하면 자동으로 얹는다 (deploy.sh 와 동일 규칙)
+  [ -f "$COMPOSE_DIR/compose.gpu.yml" ] && COMPOSE+=(-f "$COMPOSE_DIR/compose.gpu.yml")
+}
+
+# ---- 환경 추론 --------------------------------------------------------------
+infer_env() {
+  # 1) 실행 중인 컨테이너 라벨로 추론 (compose 가 서비스에 env 파일명을 남기진 않으므로
+  #    .env.images 가 로드됐는지로 staging/prod 를 가르기보다, 컨테이너 env 의 ENV 값을 본다)
+  local cid envval
+  cid="$(docker ps -q --filter name=sl_gateway 2>/dev/null | head -1 || true)"
+  if [ -n "$cid" ]; then
+    envval="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$cid" 2>/dev/null \
+              | grep -E '^(ENV|DEV_DEBUG)=' || true)"
+    if echo "$envval" | grep -q '^ENV=prod'; then echo prod; return 0; fi
+    if echo "$envval" | grep -q '^ENV=staging'; then echo staging; return 0; fi
+    if echo "$envval" | grep -q '^DEV_DEBUG=1'; then echo dev; return 0; fi
+    echo dev; return 0   # ENV 미설정 + DEV_DEBUG 없음 → dev 기본
+  fi
+  return 1
+}
+
+require_env() {  # $1 = (선택) 사용자가 준 env
+  if [ -n "${1:-}" ]; then
+    case "$1" in dev|staging|prod|production) ;; *) die "unknown env: $1 (dev|staging|prod)";; esac
+    [ "$1" = "production" ] && { echo prod; return 0; }
+    echo "$1"; return 0
+  fi
+  local inferred
+  if inferred="$(infer_env)"; then
+    info "env 추론: $inferred (실행 중인 컨테이너 기준)"
+    echo "$inferred"; return 0
+  fi
+  # 대화형 (tty 일 때만)
+  if [ -t 0 ]; then
+    echo "환경을 고르세요:" >&2
+    select e in dev staging prod; do
+      [ -n "$e" ] && { echo "$e"; return 0; }
+    done
+  fi
+  die "env 를 지정하세요: sl $CMD <dev|staging|prod>"
+}
+
+# ---- doctor -----------------------------------------------------------------
+DOCTOR_FAIL=0
+chk_ok()   { ok "$1"; }
+chk_fail() { DOCTOR_FAIL=1; c_red "✗ $1" >&2; [ -n "${2:-}" ] && c_ylw "  → 고치는 법: $2" >&2; }
+chk_warn() { warn "$1"; [ -n "${2:-}" ] && c_dim "  → $2"; }
+
+env_file_value() {  # $1=key → .env 값 (없으면 빈 문자열)
+  grep -E "^$1=" "$ENV_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true
+}
+
+doctor() {
+  local env="$1"
+  echo "== sl doctor ($env) =="
+
+  # 1) docker / compose v2
+  if command -v docker >/dev/null 2>&1 || command -v docker.exe >/dev/null 2>&1; then chk_ok "docker 설치됨"; else chk_fail "docker 없음" "https://docs.docker.com/get-docker/"; fi
+  if docker compose version >/dev/null 2>&1; then chk_ok "compose v2 사용 가능"; else chk_fail "compose v2 없음" "Docker Desktop 최신화 또는 compose-plugin 설치"; fi
+
+  # 2) .env 존재
+  if [ -f "$ENV_DIR/.env" ]; then chk_ok ".env 존재"; else chk_fail ".env 없음" "sl init $env"; fi
+
+  # 3) DATABASE_URL 채워짐
+  local dburl; dburl="$(env_file_value DATABASE_URL)"
+  if [ -z "$dburl" ]; then chk_fail "DATABASE_URL 미설정" "$ENV_DIR/.env 편집 — Supabase 대시보드 → Settings → Database → Connection info"
+  elif echo "$dburl" | grep -qE 'CHANGE_ME|<.*>'; then chk_fail "DATABASE_URL 이 템플릿 그대로" "$ENV_DIR/.env 의 DATABASE_URL 을 실제 Supabase 연결 문자열로 교체"
+  else chk_ok "DATABASE_URL 설정됨"; fi
+
+  # 4) .env.images (staging/prod)
+  if [ "$env" != "dev" ]; then
+    if [ -f "$ENV_DIR/.env.images" ]; then chk_ok ".env.images 존재"; else chk_fail ".env.images 없음" "cp deploy/env/.env.images.example deploy/env/.env.images"; fi
+  fi
+
+  # 5) strict 면 JWT 시크릿
+  local authmode; authmode="$(env_file_value AUTH_MODE)"
+  [ "$env" != "dev" ] && authmode="${authmode:-strict}"   # staging/prod 오버레이가 strict 강제
+  if [ "$authmode" = "strict" ]; then
+    local jwt; jwt="$(env_file_value SUPABASE_JWT_SECRET)$(env_file_value JWT_SECRET)"
+    if [ -z "$jwt" ]; then chk_fail "JWT 시크릿 없음 (strict 모드)" ".env 에 SUPABASE_JWT_SECRET 설정 — Supabase 대시보드 → Settings → API → JWT Secret"
+    else chk_ok "JWT 시크릿 설정됨"; fi
+  fi
+
+  # 6) GHCR 로그인 (prod)
+  if [ "$env" = "prod" ]; then
+    if [ -f "$HOME/.docker/config.json" ] && grep -q 'ghcr.io' "$HOME/.docker/config.json" 2>/dev/null; then
+      chk_ok "GHCR 로그인 상태"
+    else
+      chk_warn "GHCR 로그인 안 보임 (공개 이미지면 무시 가능)" "비공개면: echo \$GHCR_PAT | docker login ghcr.io -u <user> --password-stdin"
+    fi
+  fi
+
+  # 7) hosts (dev)
+  if [ "$env" = "dev" ]; then
+    local hosts_file="/etc/hosts"
+    [ -f "/c/Windows/System32/drivers/etc/hosts" ] && hosts_file="/c/Windows/System32/drivers/etc/hosts"
+    if grep -q 'api.localhost' "$hosts_file" 2>/dev/null; then chk_ok "hosts 에 *.localhost 등록됨"
+    else chk_warn "hosts 에 api.localhost 없음 (curl -H 'Host: api.localhost' 로 우회 가능)" "hosts 에 추가: 127.0.0.1 www.localhost api.localhost dev.localhost"; fi
+  fi
+
+  echo
+  if [ "$DOCTOR_FAIL" = "1" ]; then
+    c_red "doctor: 실패 항목 있음 — 위 '고치는 법'을 먼저 처리하세요."
+    return 1
+  fi
+  c_grn "doctor: 이 환경은 기동 가능해 보입니다. → sl up $env"
+}
+
+# ---- init -------------------------------------------------------------------
+init_env() {
+  local env="$1"
+  echo "== sl init ($env) =="
+
+  # 1) .env 생성
+  if [ ! -f "$ENV_DIR/.env" ]; then
+    local tmpl="$ENV_DIR/.env.example"
+    [ "$env" = "dev" ] && [ -f "$ENV_DIR/.env.dev.example" ] && tmpl="$ENV_DIR/.env.dev.example"
+    [ "$env" = "prod" ] && [ -f "$ENV_DIR/.env.prod.example" ] && tmpl="$ENV_DIR/.env.prod.example"
+    cp "$tmpl" "$ENV_DIR/.env"
+    ok ".env 생성 (← $(basename "$tmpl"))"
+  else
+    info ".env 이미 존재 — 건드리지 않음"
+  fi
+
+  # 2) .env.images 생성
+  if [ ! -f "$ENV_DIR/.env.images" ]; then
+    cp "$ENV_DIR/.env.images.example" "$ENV_DIR/.env.images"
+    ok ".env.images 생성"
+  else
+    info ".env.images 이미 존재 — 건드리지 않음"
+  fi
+
+  # 3) 필수 값 대화형 채우기 (tty + 템플릿 상태일 때만)
+  if [ -t 0 ]; then
+    fill_if_placeholder DATABASE_URL "Supabase Postgres 연결 문자열 (대시보드 → Settings → Database)"
+    fill_if_placeholder SUPABASE_URL "Supabase Project URL (https://<ref>.supabase.co)"
+    fill_if_placeholder SUPABASE_SERVICE_KEY "Supabase service_role 키 (절대 외부 노출 금지)"
+    fill_if_placeholder SUPABASE_JWT_SECRET "Supabase JWT Secret (Settings → API)"
+  else
+    grep -qE 'CHANGE_ME|<.*>' "$ENV_DIR/.env" && warn ".env 에 템플릿 값이 남아 있습니다 — 편집 후 sl doctor $env 를 실행하세요."
+  fi
+
+  # 4) htpasswd (dev 접근용)
+  if [ "$env" = "dev" ] && [ ! -f "$ROOT/deploy/nginx/.htpasswd" ]; then
+    if command -v htpasswd >/dev/null 2>&1; then
+      if [ -t 0 ]; then
+        echo; read -rp "개발자 콘솔 Basic Auth 계정을 만들까요? [y/N] " yn
+        if [ "${yn:-N}" = "y" ] || [ "${yn:-N}" = "Y" ]; then
+          read -rp "  사용자명 [admin]: " u; u="${u:-admin}"
+          htpasswd -bc "$ROOT/deploy/nginx/.htpasswd" "$u" "$(read -rsp '  비밀번호: ' p; echo; echo "$p")" && ok ".htpasswd 생성 ($u)"
+        fi
+      fi
+    else
+      warn "htpasswd 없음 — 필요 시: sudo apt-get install -y apache2-utils"
+    fi
+  fi
+
+  # 5) hosts 안내 (dev)
+  if [ "$env" = "dev" ]; then
+    echo
+    info "로컬 브라우저 접속용 hosts 등록 (아직이면):"
+    c_dim "  Windows : C:\\Windows\\System32\\drivers\\etc\\hosts"
+    c_dim "  Linux   : /etc/hosts"
+    c_dim "  추가할 줄: 127.0.0.1  www.localhost api.localhost dev.localhost"
+  fi
+
+  echo
+  doctor "$env" || true
+}
+
+fill_if_placeholder() {  # $1=key $2=설명
+  local key="$1" desc="$2" cur
+  cur="$(env_file_value "$key")"
+  if [ -z "$cur" ] || echo "$cur" | grep -qE 'CHANGE_ME|<.*>'; then
+    echo
+    c_ylw "$key 설정 필요 — $desc"
+    read -rp "  값 입력 (Enter=걸너뛰기): " v
+    if [ -n "$v" ]; then
+      if grep -qE "^$key=" "$ENV_DIR/.env"; then
+        # 주석 처리된 라인이면 활성화하며 교체
+        if grep -qE "^# *$key=" "$ENV_DIR/.env"; then
+          sed -i "s|^# *$key=.*|$key=$v|" "$ENV_DIR/.env"
+        else
+          sed -i "s|^$key=.*|$key=$v|" "$ENV_DIR/.env"
+        fi
+      else
+        echo "$key=$v" >> "$ENV_DIR/.env"
+      fi
+      ok "$key 저장"
+    fi
+  fi
+}
+
+# ---- 명령 -------------------------------------------------------------------
+usage() { sed -n '2,19p' "$0"; exit "${1:-0}"; }
+
+CMD="${1:-}"; shift || true
+case "$CMD" in
+  up)
+    ENV="$(require_env "${1:-}")"
+    [ "$ENV" = "prod" ] && { doctor prod || die "doctor 실패 — --force 없이는 기동하지 않습니다 (우회: sl doctor prod 로 원인 확인)"; }
+    build_compose "$ENV"
+    if [ "$ENV" = "dev" ]; then
+      "${COMPOSE[@]}" up -d --build
+    else
+      "${COMPOSE[@]}" up -d
+    fi
+    ok "up ($ENV) 완료 — 상태: sl ps $ENV"
+    ;;
+  down)
+    ENV="$(require_env "${1:-}")"
+    build_compose "$ENV"
+    if [ "$ENV" = "prod" ] && [ -t 0 ]; then
+      read -rp "정말 prod 를 내릴까요? [yes/N] " yn
+      [ "$yn" = "yes" ] || die "취소됨"
+    fi
+    "${COMPOSE[@]}" down
+    ok "down ($ENV) 완료"
+    ;;
+  logs)
+    ENV="$(require_env "${1:-}")"; SVC="${2:-}"
+    build_compose "$ENV"
+    "${COMPOSE[@]}" logs -f --tail=100 ${SVC:+"$SVC"}
+    ;;
+  ps)
+    ENV="$(require_env "${1:-}")"
+    build_compose "$ENV"
+    "${COMPOSE[@]}" ps
+    ;;
+  doctor)
+    ENV="$(require_env "${1:-}")"
+    doctor "$ENV"
+    ;;
+  init)
+    ENV="$(require_env "${1:-}")"
+    init_env "$ENV"
+    ;;
+  deploy)
+    SVC="${1:-}"; IMG="${2:-}"; shift 2 || true
+    [ -n "$SVC" ] && [ -n "$IMG" ] || die "usage: sl deploy <service> <image> [--env staging|prod] [--pull]"
+    exec "$HERE/deploy.sh" --service "$SVC" --image "$IMG" "$@"
+    ;;
+  ""|-h|--help|help)
+    usage 0;;
+  *)
+    c_red "unknown command: $CMD" >&2; usage 2;;
+esac

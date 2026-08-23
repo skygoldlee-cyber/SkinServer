@@ -1,0 +1,153 @@
+# =============================================================
+# compose.base.yml — 모든 환경 공통 정의 (단일 진실원본)
+#
+# 이 파일 하나에 서비스·네트워크·하드닝·헬스체크를 모두 정의하고,
+# 환경 차이(빌드 vs 이미지, 로컬 db vs Supabase)는 오버레이로 얹는다.
+#
+#   dev      : compose.base.yml + compose.dev.yml       (소스 빌드 + Supabase)
+#   staging  : compose.base.yml + compose.staging.yml   (배포 이미지 + Supabase)
+#   prod     : compose.base.yml + compose.prod.yml       (배포 이미지 + Supabase)
+#   +GPU/TLS : ... + compose.gpu.yml / compose.tls.yml   (운영 오버레이)
+#
+# 상대경로는 이 파일 위치(deploy/compose/) 기준으로 해석된다.
+#   ../nginx        → deploy/nginx
+#   ../env/.env     → deploy/env/.env
+#   ../../apps/...  → 리포 루트 apps/
+#   ../../services/ → 리포 루트 services/ (빌드 컨텍스트, dev 오버레이)
+# =============================================================
+name: skinlens
+
+networks:
+  appnet:              # 앱 ↔ DB/캐시
+  enginenet:
+    internal: true     # ★ 외부 egress 차단 — 엔진은 인터넷/Supabase 불가 (Case A)
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  # ---- API 게이트웨이: 단일 쓰기 주체 · 유일한 교차점 ---------------------
+  gateway:
+    image: ${GATEWAY_IMAGE:-sl_gateway:latest}
+    container_name: sl_gateway
+    env_file: [../env/.env]
+    environment:
+      # (P1 #4) DB 자격증명은 필수값 — .env 누락 시 약한 기본값으로 부팅되던
+      #         것을 막기 위해 DATABASE_URL 에 ?(필수) 를 건다.
+      #         .env 가 없으면 compose 가 즉시 오류를 낸다(fail-fast).
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in deploy/env/.env (Supabase postgres connection string)}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-supabase}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:-}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-skin-images}
+      ENGINE_ANALYSIS_URL: http://engine-analysis:8000
+      ENGINE_PRESCRIPTION_URL: http://engine-prescription:8000
+      # CORS 허용 오리진 — Vercel 도메인 분리로 인해 필수(Phase 3.1).
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      # 앱단 413 경계 = 엣지 Caddy/리버스 프록시 상한과 일치시킬 것.
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-26214400}   # 25 * 1024 * 1024
+      # Phase 4: presigned 업로드 전환. 구 multipart 는 플래그로 초기 호환 유지→제거.
+      ENABLE_LEGACY_UPLOAD: ${ENABLE_LEGACY_UPLOAD:-1}  # 0 으로 닫으면 multipart 폐기(410)
+      PRESIGN_EXPIRES_SEC: ${PRESIGN_EXPIRES_SEC:-900}  # 서명 URL 만료(15분, 유출 피해 축소)
+      PRESIGN_RATE_PER_MIN: ${PRESIGN_RATE_PER_MIN:-10} # 사용자당 분당 presign 발급 상한
+    networks: [appnet, enginenet]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    mem_limit: 1g
+    cpus: "1.5"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+    restart: unless-stopped
+
+  # ---- 비동기 워커: Job 소비 · 엔진 호출 · 결과 쓰기 ----------------------
+  worker:
+    image: ${WORKER_IMAGE:-sl_worker:latest}
+    container_name: sl_worker
+    env_file: [../env/.env]
+    environment:
+      # (P1 #4) gateway 와 동일 — DATABASE_URL 필수값화(fail-fast).
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in deploy/env/.env (Supabase postgres connection string)}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-supabase}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:-}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-skin-images}
+      ENGINE_ANALYSIS_URL: http://engine-analysis:8000
+      ENGINE_PRESCRIPTION_URL: http://engine-prescription:8000
+      POLL_INTERVAL: "2"
+    depends_on:
+      engine-analysis: { condition: service_healthy }
+      engine-prescription: { condition: service_healthy }
+    networks: [appnet, enginenet]       # frontnet 아님
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    mem_limit: 1g
+    cpus: "1.5"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/worker_alive"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging: *logging
+    restart: unless-stopped
+
+  # ---- 분석 엔진 (폐쇄망 · GPU · 자격증명 없음) ---------------------------
+  engine-analysis:
+    image: ${ENGINE_ANALYSIS_IMAGE:-ghcr.io/coteleafdev/skinlens-engine-analysis:latest}
+    container_name: sl_engine_analysis
+    networks: [enginenet]               # ★ internal 전용
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    mem_limit: 2g                       # ★ 모델 크기에 맞춰 상향 (GPU 워크로드)
+    cpus: "2.0"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+    restart: unless-stopped
+
+  # ---- 처방 엔진 (폐쇄망 · 분석/설문/PCR 중 ≥1) --------------------------
+  engine-prescription:
+    image: ${ENGINE_PRESCRIPTION_IMAGE:-ghcr.io/coteleafdev/skinlens-engine-prescription:latest}
+    container_name: sl_engine_prescription
+    networks: [enginenet]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    mem_limit: 2g                       # ★ 규칙/모델 크기에 맞춰 상향
+    cpus: "1.5"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+    restart: unless-stopped
+
+  # ---- (예약) 캐시/큐 ----------------------------------------------------
+  # 현재 Job 큐는 Postgres FOR UPDATE SKIP LOCKED 기반이라 Redis 를 쓰지 않는다.
+  # Phase 3(캐시/성능)에서 도입할 때 아래 블록과 gateway/worker 의 REDIS_URL,
+  # appnet 상의 depends_on 을 함께 되살린다.
+  #
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: sl_redis
+  #   command: ["redis-server", "--save", "", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+  #   networks: [appnet]
+  #   security_opt: ["no-new-privileges:true"]
+  #   mem_limit: 384m
+  #   logging: *logging
+  #   restart: unless-stopped

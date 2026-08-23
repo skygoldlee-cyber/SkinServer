@@ -1,0 +1,177 @@
+name: engine-cd
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - 'services/engine-analysis/**'
+      - 'services/engine-prescription/**'
+      - 'packages/**'
+  workflow_dispatch:
+
+concurrency:
+  group: engine-cd-${{ github.ref_name }}-${{ github.event.repository.name }}
+  cancel-in-progress: false
+
+jobs:
+  # ---- 1단계: 변경사항 감지 ----
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      engine-analysis: ${{ steps.filter.outputs.engine-analysis }}
+      engine-prescription: ${{ steps.filter.outputs.engine-prescription }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            engine-analysis:
+              - 'services/engine-analysis/**'
+              - 'packages/**'
+            engine-prescription:
+              - 'services/engine-prescription/**'
+              - 'packages/**'
+
+  # ---- 2단계: 회귀 및 품질 게이트 테스트 ----
+  test-gate:
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      
+      - name: OpenCv 의존 라이브러리 설치
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-0
+      
+      - name: 의존성 설치
+        run: pip install -r requirements-dev.txt
+        
+      - name: 단위 및 회귀 테스트 실행
+        run: |
+          # 단위 테스트 실행 (integration 제외)
+          pytest -m "not integration" -v
+          # 스코어링 및 처방 회귀 테스트 실행 (핵심 게이트)
+          pytest tests/test_scoring_regression.py -v
+
+  # ---- 3단계: Docker 이미지 빌드 및 GHCR 푸시 ----
+  build-and-push:
+    needs: [changes, test-gate]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: engine-analysis
+            image_name: skinlens-engine-analysis
+          - service: engine-prescription
+            image_name: skinlens-engine-prescription
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: 변경 엔진 여부 확인
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            CHANGED="${{ needs.changes.outputs[matrix.service] }}"
+            echo "run=${CHANGED}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - name: GHCR 로그인
+        if: steps.gate.outputs.run == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 태그 정보 생성
+        if: steps.gate.outputs.run == 'true'
+        id: meta
+        run: |
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          TAG="ghcr.io/${OWNER}/${{ matrix.image_name }}:${GITHUB_SHA::12}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: 빌드 및 GHCR 푸시
+        if: steps.gate.outputs.run == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          file: services/${{ matrix.service }}/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.tag }}
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---- 4단계: Render Web Service 배포 트리거 ----
+  deploy-render:
+    needs: [changes, build-and-push]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: engine-analysis
+            image_name: skinlens-engine-analysis
+          - service: engine-prescription
+            image_name: skinlens-engine-prescription
+    runs-on: ubuntu-latest
+    steps:
+      - name: 변경 엔진 여부 확인
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            CHANGED="${{ needs.changes.outputs[matrix.service] }}"
+            echo "run=${CHANGED}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Render Deploy Hook 호출 (Staging / Production 분기)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          # 환경 설정 및 이미지 태그 획득
+          ENVN="${{ github.ref_name == 'main' && 'PROD' || 'STAGING' }}"
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          IMAGE_TAG="ghcr.io/${OWNER}/${{ matrix.image_name }}:${GITHUB_SHA::12}"
+          
+          # 이미지 URL 인코딩 (Render Deploy Hook 규격 요구사항)
+          ENCODED_IMAGE=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$IMAGE_TAG'))")
+          
+          # 대상 서비스 별 Deploy Hook 시크릿 매핑
+          if [ "${{ matrix.service }}" = "engine-analysis" ]; then
+            if [ "$ENVN" = "PROD" ]; then
+              HOOK_URL="${{ secrets.RENDER_DEPLOY_HOOK_ANALYSIS_PROD }}"
+            else
+              HOOK_URL="${{ secrets.RENDER_DEPLOY_HOOK_ANALYSIS_STAGING }}"
+            fi
+          else
+            if [ "$ENVN" = "PROD" ]; then
+              HOOK_URL="${{ secrets.RENDER_DEPLOY_HOOK_PRESCRIPTION_PROD }}"
+            else
+              HOOK_URL="${{ secrets.RENDER_DEPLOY_HOOK_PRESCRIPTION_STAGING }}"
+            fi
+          fi
+          
+          # Deploy Hook URL 검증
+          if [ -z "$HOOK_URL" ]; then
+            echo "Error: Deploy Hook URL secret is missing for ${{ matrix.service }} ($ENVN)"
+            exit 1
+          fi
+          
+          # Render 배포 트리거 API 호출
+          echo "Triggering Render deploy for ${{ matrix.service }} ($ENVN) with image: $IMAGE_TAG"
+          curl -s -f -X POST "${HOOK_URL}&imgURL=${ENCODED_IMAGE}"
+          echo "Deploy trigger sent successfully."

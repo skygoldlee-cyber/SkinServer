@@ -1,0 +1,49 @@
+# =============================================================
+# docker-compose.tls.yml — TLS 오버레이 (★ 운영 VPS 에만 배치)
+#
+#  구조:
+#    Internet :80/:443 → caddy(자동 인증서·HTTP→HTTPS·HSTS)
+#                      → gateway:8000(잡 생성/조회)
+#
+#  왜 Caddy 앞단인가:
+#   - 인증서 자동 발급/갱신(Let's Encrypt) — dockerized certbot 갱신 지옥 회피.
+#   - 웹 정적 표면은 Vercel 로 이관되었으므로, 여기서는 AI Server API 만 TLS 종단.
+#   - 보안헤더·HSTS 는 Caddyfile 에서 1회만 설정(기존 nginx security-headers.conf 책임 이주).
+#
+#  포트 소유권:
+#   - 이 오버레이가 얹히면 gateway 의 host 포트를 !reset 으로 비우고(8000 을 host 에
+#     노출하지 않음) Caddy 가 80/443 을 소유한다. (Compose v2.24+ 의 !reset 필요)
+#
+#  배선: deploy.sh 가 "이 파일이 존재하면" 자동으로 -f 로 얹는다.
+#        스테이징 WSL 에는 두지 않는다 = HTTP(8000) 직결(개발용).
+#
+#  준비물(운영 호스트):
+#   - DNS A레코드가 이 VPS 를 가리켜야 ACME(http-01/tls-alpn) 통과.
+#   - Caddyfile 의 도메인/이메일 실제 값으로 교체.
+# =============================================================
+
+services:
+  caddy:
+    image: caddy:2
+    container_name: sl_caddy
+    depends_on: [gateway]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data           # 발급된 인증서(영구)
+      - caddy_config:/config
+    networks: [appnet]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+    restart: unless-stopped
+
+  gateway:
+    # Caddy 가 host 의 80/443 을 소유하므로 gateway 는 host 포트를 열지 않는다.
+    ports: !reset []
+
+volumes:
+  caddy_data:
+  caddy_config:

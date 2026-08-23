@@ -1,0 +1,27 @@
+# dependencies
+/node_modules
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# PWA generated service worker (next-pwa → public/)
+/public/sw.js
+/public/sw.js.map
+/public/workbox-*.js
+/public/workbox-*.js.map
+/public/worker-*.js
+/public/worker-*.js.map
+
+# env
+.env
+.env*.local
+
+# misc
+.DS_Store
+*.pem
+npm-debug.log*
+/coverage

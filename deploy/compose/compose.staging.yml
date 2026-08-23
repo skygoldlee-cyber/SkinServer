@@ -1,0 +1,27 @@
+# =============================================================
+# compose.staging.yml — 스테이징(WSL) 오버레이
+#   실행 이미지는 base 기본값/.env.images 태그를 그대로 사용(빌드 없음).
+#   DB/Storage/Auth 는 전 환경 Supabase 프로젝트를 사용한다(로컬 db 없음).
+#
+# 사용:
+#   docker compose -f deploy/compose/compose.base.yml \
+#                  -f deploy/compose/compose.staging.yml \
+#                  --env-file deploy/env/.env --env-file deploy/env/.env.images up -d
+# =============================================================
+services:
+  gateway:
+    environment:
+      ENV: staging                 # 환경 구분 명시(prod 와 동일하게 ENV 를 설정해 일관성 확보)
+      AUTH_MODE: strict
+      STORAGE_BACKEND: supabase
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-skin-images}
+
+  worker:
+    environment:
+      ENV: staging
+      STORAGE_BACKEND: supabase
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-skin-images}

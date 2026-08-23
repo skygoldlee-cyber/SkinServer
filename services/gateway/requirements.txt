@@ -1,0 +1,10 @@
+# 핀 고정: 서버에서 직접 빌드하는 CD 재현성 확보(상류 breaking change 차단). 의도적으로만 bump.
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.18
+psycopg[binary,pool]==3.3.4
+psycopg-pool==3.3.1
+pydantic==2.10.4
+httpx==0.28.1
+pyjwt==2.10.1          # strict 인증: Supabase JWT(HS256) 검증
+# redis 클라이언트는 Phase 3(캐시) 도입 시 추가. 현재 큐는 Postgres SKIP LOCKED.

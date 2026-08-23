@@ -1,0 +1,57 @@
+# =============================================================
+# docker-compose.gpu.yml — GPU 오버레이 (★ GPU 호스트에만 배치)
+#
+#  배선 원리:
+#   - deploy.sh 가 "이 파일이 존재하면" 자동으로 -f 로 얹는다.
+#     → 스테이징 WSL(보통 GPU 없음)에는 이 파일을 두지 않는다 = base 그대로 CPU.
+#     → 운영 VPS(GPU)에는 이 파일을 두면 = 엔진이 GPU 로 뜬다.
+#
+#  VRAM 경합 대책(단일 GPU 전제):
+#   - 두 엔진을 GPU 0 에 고정하되, 엔진 내부 동시성=1 로 직렬화.
+#   - 근본 처리량은 "동시에 처리하는 Job 수"로 통제한다 → worker 동시성=1
+#     이면 analysis→prescription 이 Job 단위로 순차 실행되어 두 모델이
+#     동시에 VRAM 을 뜨겁게 쓰는 구간이 사라진다. (02_적합성검토 §7)
+#   - 캐시(HF/torch)는 read_only 루트fs 를 피해 tmpfs(/tmp) 로 보낸다.
+#
+#  사전(운영 호스트): NVIDIA 드라이버 + NVIDIA Container Toolkit
+#   (windows11_ubuntu_server_setup.md §26). `nvidia-smi` 가 보여야 함.
+#   Compose 는 v2.24+ 권장(디바이스 예약 안정).
+# =============================================================
+
+services:
+  engine-analysis:
+    environment:
+      ENGINE_MAX_CONCURRENCY: "1"           # 엔진 내부 추론 직렬화
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"  # 단편화 완화
+      HF_HOME: "/tmp/hf"                     # read_only 루트fs 회피
+      TORCH_HOME: "/tmp/torch"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]             # 단일 GPU 고정(둘 다 0번)
+              capabilities: ["gpu"]
+
+  engine-prescription:
+    environment:
+      ENGINE_MAX_CONCURRENCY: "1"
+      PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      HF_HOME: "/tmp/hf"
+      TORCH_HOME: "/tmp/torch"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: ["gpu"]
+
+  # Job 단위 순차 처리로 GPU 경합의 근본 차단(초기값). 처리량이 필요하면
+  # VRAM 여유를 확인하며 단계적으로 상향.
+  worker:
+    environment:
+      WORKER_CONCURRENCY: "1"
+
+# 참고: 위 deploy.resources 가 환경에 따라 무시되면(구버전 등)
+#   각 엔진에 대안으로  runtime: nvidia  또는  gpus: all  을 쓴다.

@@ -1,0 +1,23 @@
+{
+  "_note": "placeholder — 실제 배합/선택 규칙은 '꼬뜨리브 맞춤형 13품목' 엑셀에서 채운다. 코드 슬롯만 제공.",
+  "version": "example-not-real",
+  "trigger_grades": ["보통", "위험/심각"],
+  "metric_to_mixes": {
+    "oiliness":            ["M03"],
+    "dryness":             ["M04"],
+    "combination":         ["M05"],
+    "sensitivity":         ["M06"],
+    "trouble":             ["M10"],
+    "pigmentation_tone":   ["M07"],
+    "pores":               ["M11"],
+    "texture":             ["M11"],
+    "wrinkle_elasticity":  ["M08", "M09"],
+    "redness":             ["M11"]
+  },
+  "base_mixes": ["M01", "M02"],
+  "pcr_to_mixes": {
+    "cutibacterium_high": ["PM01"],
+    "malassezia_high":    ["PM02"],
+    "diversity_low":      ["PM03"]
+  }
+}

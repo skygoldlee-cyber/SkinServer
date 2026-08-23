@@ -1,0 +1,21 @@
+# =============================================================
+# crontab.example — 후속 잡 스케줄 (①·②)
+#  설치: crontab -e 로 아래 라인 추가(경로/환경 실제값으로 교체).
+#  환경변수는 각 라인 앞이나 상단에서 정의하거나, 래퍼 스크립트에서 source .env.
+# =============================================================
+
+# 공통 경로(예시)
+OPS=/home/YOU/ops
+FOLLOWUP=$OPS/followup-P1
+
+# ── ① 보존/삭제: 매일 03:10 (먼저 DRY_RUN=1 로 며칠 관찰 후 0 으로) ──
+10 3 * * *  cd $OPS && DRY_RUN=1 docker compose --env-file .env run --rm \
+              -v $FOLLOWUP:/app/followup-P1 worker \
+              python /app/followup-P1/retention.py >> /var/log/skinlens/retention.log 2>&1
+
+# ── ② 알림: 5분마다 디스크/VRAM/큐 점검 ──
+*/5 * * * *  ALERT_WEBHOOK="https://hooks.example/xxx" \
+              DATABASE_URL="postgresql://…" \
+              $FOLLOWUP/observability/alert.sh >> /var/log/skinlens/alert.log 2>&1
+
+# 로그 디렉터리 미리: sudo mkdir -p /var/log/skinlens && sudo chown YOU /var/log/skinlens

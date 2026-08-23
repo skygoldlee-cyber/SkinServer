@@ -1,0 +1,12 @@
+# SkinLens 운영 크론 — 서버의 crontab 에 반영(경로는 배포 위치에 맞게 수정).
+# 편집: crontab -e  또는  /etc/cron.d/skinlens 로 배치.
+# 환경변수(.env)는 각 스크립트가 자체 로드하거나, 여기서 export 후 호출.
+
+# 매일 03:10 — 완료 원본/미완료 정리(개인정보 보존정책)
+10 3 * * *  cd /home/USER/skinlens && python3 deploy/ops-jobs/retention.py >> /var/log/skinlens/retention.log 2>&1
+
+# 5분마다 — 디스크/큐/VRAM 임계 알림
+*/5 * * * * cd /home/USER/skinlens && bash deploy/ops-jobs/observability/alert.sh >> /var/log/skinlens/alert.log 2>&1
+
+# 매주 일 04:00 — 백업 복구 리허설(스테이징에서만)
+0 4 * * 0   cd /home/USER/skinlens && bash deploy/ops-jobs/restore-rehearsal.sh >> /var/log/skinlens/restore.log 2>&1

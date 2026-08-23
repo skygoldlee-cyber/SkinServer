@@ -1,0 +1,4 @@
+# 핀 고정(재현성).
+httpx==0.28.1
+psycopg[binary,pool]==3.3.4
+psycopg-pool==3.3.1

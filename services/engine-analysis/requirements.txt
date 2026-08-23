@@ -1,0 +1,7 @@
+# 핀 고정(재현성). GHCR CI 빌드 이미지 — numpy/opencv 조합 고정이 특히 중요.
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.18
+pydantic==2.10.4
+numpy==1.26.4
+opencv-python-headless==4.10.0.84

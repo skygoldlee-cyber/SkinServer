@@ -1,0 +1,38 @@
+# =============================================================
+# webapp 레포용 — 서버에서 빌드(Vite→정적, nginx 서빙 이미지). sha 태그 + deploy.sh 헬스게이트/롤백.
+#  .github/workflows/deploy.yml 로 복사. (gateway/worker 패턴과 동일, DB 마이그레이션 없음.)
+# =============================================================
+name: deploy-webapp
+
+on:
+  push:
+    branches: [develop, main]
+    paths: [ 'apps/webapp/**' ]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref_name }}-webapp
+  cancel-in-progress: false
+
+env:
+  SERVICE: webapp
+
+jobs:
+  deploy:
+    runs-on: ${{ github.ref_name == 'main' && fromJSON('["self-hosted","production"]') || fromJSON('["self-hosted","staging"]') }}
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 서버에서 이미지 빌드(sha 태그)
+        run: |
+          set -euo pipefail
+          TAG="sl_webapp:${GITHUB_SHA::12}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          docker build -t "$TAG" apps/webapp
+
+      - name: 헬스체크 게이트 + 롤백 배포
+        run: |
+          set -euo pipefail
+          ENVN="${{ github.ref_name == 'main' && 'production' || 'staging' }}"
+          "$HOME/ops/deploy.sh" --service "$SERVICE" --image "$TAG" --env "$ENVN"

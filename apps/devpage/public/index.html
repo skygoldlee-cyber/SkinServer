@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkinLens — 파이프라인 점검 콘솔 (dev)</title>
+<style>
+  :root { --bg:#0e1116; --panel:#171b22; --line:#262c36; --fg:#e6e9ef; --mut:#8b95a5;
+          --ok:#3fb950; --warn:#d29922; --err:#f85149; --acc:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  header { padding:16px 20px; border-bottom:1px solid var(--line); }
+  h1 { margin:0; font-size:16px; } .sub { color:var(--mut); font-size:12px; margin-top:4px; }
+  main { display:grid; grid-template-columns:280px 1fr; gap:0; min-height:calc(100vh - 66px); }
+  aside { border-right:1px solid var(--line); padding:16px; }
+  section { padding:16px 20px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:12px 14px; margin-bottom:12px; }
+  .card h2 { margin:0 0 8px; font-size:12px; color:var(--mut); text-transform:uppercase; letter-spacing:.05em; }
+  .part { display:flex; justify-content:space-between; align-items:center; padding:4px 0; }
+  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:7px; background:var(--mut); }
+  .dot.ok{background:var(--ok);} .dot.err{background:var(--err);} .dot.warn{background:var(--warn);}
+  button { background:var(--acc); color:#00122b; border:0; border-radius:6px; padding:8px 12px;
+           font:inherit; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--fg); border:1px solid var(--line); }
+  input[type=file]{ font:inherit; color:var(--mut); }
+  .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .timeline{ list-style:none; margin:0; padding:0; }
+  .stage{ border-left:2px solid var(--line); padding:0 0 14px 14px; position:relative; }
+  .stage::before{ content:""; position:absolute; left:-6px; top:3px; width:10px; height:10px;
+                  border-radius:50%; background:var(--line); }
+  .stage.done::before{ background:var(--ok); } .stage.err::before{ background:var(--err); }
+  .stage .st{ font-weight:600; } .stage .tt{ color:var(--mut); font-size:12px; margin-left:8px; }
+  pre{ background:#0b0e13; border:1px solid var(--line); border-radius:6px; padding:10px;
+       overflow:auto; margin:6px 0 0; font-size:12px; color:#cdd6e4; }
+  .muted{ color:var(--mut); } a{ color:var(--acc); }
+  code.k{ color:#7ee787; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SkinLens · 파이프라인 점검 콘솔 <span class="muted">(dev)</span></h1>
+  <div class="sub">엔진 세부 로직은 스텁입니다. 이 콘솔은 <b>파트별 상태</b>와 <b>단계별 산출물</b>을 확인하기 위한 것입니다. API 는 same-origin <code class="k">/api</code> 로 호출됩니다.</div>
+</header>
+<main>
+  <aside>
+    <div class="card">
+      <h2>파트 상태</h2>
+      <div class="part"><span><span id="d-gw" class="dot"></span>gateway</span><span id="s-gw" class="muted">…</span></div>
+      <div class="part"><span><span id="d-db" class="dot"></span>db</span><span id="s-db" class="muted">…</span></div>
+      <div class="part"><span><span id="d-ea" class="dot"></span>engine-analysis</span><span id="s-ea" class="muted">…</span></div>
+      <div class="part"><span><span id="d-ep" class="dot"></span>engine-prescription</span><span id="s-ep" class="muted">…</span></div>
+      <div class="row" style="margin-top:10px">
+        <button class="ghost" onclick="checkParts()">다시 확인</button>
+      </div>
+      <div class="sub" style="margin-top:8px">engine 은 폐쇄망이라 gateway 의 <code class="k">/debug/engines</code> 로 대리 확인합니다.</div>
+    </div>
+    <div class="card">
+      <h2>최근 job</h2>
+      <div id="joblist" class="muted">…</div>
+    </div>
+  </aside>
+  <section>
+    <div class="card">
+      <h2>새 분석 실행</h2>
+      <div class="row">
+        <input id="file" type="file" accept="image/jpeg,image/png,image/webp">
+        <button onclick="submitJob()">업로드 → 분석</button>
+        <span id="submitMsg" class="muted"></span>
+      </div>
+      <div style="margin-top:8px">
+        <div class="sub">설문(JSON, 선택) — 사진과 함께 전송됩니다</div>
+        <textarea id="survey" rows="4" style="width:100%;background:#0b0e13;color:#cdd6e4;border:1px solid var(--line);border-radius:6px;padding:8px;font:inherit"
+          placeholder='{"skin_type":"sensitive","sensitivity":{"stings_easily":true,"redness_frequent":true},"concerns":["redness","dryness"]}'></textarea>
+      </div>
+      <div class="sub" style="margin-top:6px">엔진은 해시가 아닌 실측 CV 지표를 냅니다. 설문은 민감성·복합성 등 설문 기반 지표를 채웁니다.</div>
+    </div>
+    <div class="card">
+      <h2>단계별 타임라인 <span id="jobTag" class="muted"></span></h2>
+      <ul id="timeline" class="timeline"><li class="muted">job 을 실행하거나 왼쪽에서 선택하세요.</li></ul>
+    </div>
+  </section>
+</main>
+<script>
+const API = "/api";
+const $ = s => document.querySelector(s);
+async function j(url, opt){ const r = await fetch(url, opt); const t = await r.text();
+  let b; try{ b = JSON.parse(t); }catch{ b = t; } return { ok:r.ok, status:r.status, body:b }; }
+function setDot(id, state, txt){ $("#d-"+id).className = "dot "+state; $("#s-"+id).textContent = txt; }
+async function checkParts(){
+  const h = await j(API+"/health");
+  setDot("gw", h.ok?"ok":"err", h.ok?"ok":("err "+h.status));
+  const db = await j(API+"/health/db");
+  setDot("db", db.ok?"ok":"err", db.ok?"ok":("err "+db.status));
+  const e = await j(API+"/debug/engines");
+  if(!e.ok){ setDot("ea","warn","n/a"); setDot("ep","warn","n/a"); return; }
+  for(const pair of [["engine-analysis","ea"],["engine-prescription","ep"]]){
+    const s = e.body[pair[0]]||{}; setDot(pair[1], s.reachable?"ok":"err", s.reachable?"ok":"unreachable");
+  }
+}
+async function loadJobs(){
+  const r = await j(API+"/jobs?limit=10");
+  if(!r.ok){ $("#joblist").textContent = "조회 실패"; return; }
+  const jobs = r.body.jobs||[];
+  $("#joblist").innerHTML = jobs.length ? jobs.map(x =>
+    '<div class="part"><a href="#" onclick="watch(\''+x.id+'\');return false">'+x.id.slice(0,8)+'…</a>'+
+    '<span class="muted">'+x.status+'</span></div>').join("") : '<span class="muted">없음</span>';
+}
+async function submitJob(){
+  const f = $("#file").files[0];
+  if(!f){ $("#submitMsg").textContent = "파일을 선택하세요"; return; }
+  const fd = new FormData(); fd.append("image", f);
+  const sv = $("#survey").value.trim();
+  if(sv){
+    try{ JSON.parse(sv); }catch(e){ $("#submitMsg").textContent="설문 JSON 형식 오류"; return; }
+    fd.append("survey", sv);
+  }
+  $("#submitMsg").textContent = "업로드 중…";
+  const r = await j(API+"/analyze", { method:"POST", body:fd });
+  if(r.status!==202){ $("#submitMsg").textContent = "실패: "+JSON.stringify(r.body); return; }
+  $("#submitMsg").textContent = "job "+r.body.job_id.slice(0,8)+"… 등록됨";
+  loadJobs(); watch(r.body.job_id);
+}
+let poll=null;
+async function watch(id){
+  if(poll) clearInterval(poll);
+  $("#jobTag").textContent = "· "+id;
+  const render = async () => {
+    const results = await Promise.all([ j(API+"/jobs/"+id), j(API+"/jobs/"+id+"/events") ]);
+    const job = results[0], ev = results[1];
+    const events = (ev.ok && ev.body.events) ? ev.body.events : [];
+    const status = job.ok ? job.body.status : "?";
+    $("#timeline").innerHTML = events.map(function(e){
+      const cls = e.stage==="done" ? "done" : ((e.stage==="error"||e.stage.indexOf(":skipped")>=0)?"err":"");
+      const d = e.detail!=null ? '<pre>'+escapeHtml(JSON.stringify(e.detail,null,2))+'</pre>' : "";
+      return '<li class="stage '+cls+'"><span class="st">'+e.stage+'</span>'+
+             '<span class="tt">'+new Date(e.at).toLocaleTimeString()+'</span>'+d+'</li>';
+    }).join("") || '<li class="muted">이벤트 대기 중…</li>';
+    if(job.ok && job.body.result){
+      $("#timeline").innerHTML += '<li class="stage done"><span class="st">result (최종)</span>'+
+        '<pre>'+escapeHtml(JSON.stringify(job.body.result,null,2))+'</pre></li>';
+    }
+    if(status==="done" || status==="error"){ clearInterval(poll); poll=null; loadJobs(); }
+  };
+  render(); poll = setInterval(render, 1000);
+}
+function escapeHtml(s){ return s.replace(/[&<>]/g, function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c];}); }
+checkParts(); loadJobs(); setInterval(checkParts, 15000);
+</script>
+</body>
+</html>

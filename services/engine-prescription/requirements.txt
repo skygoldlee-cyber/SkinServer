@@ -1,0 +1,5 @@
+# 핀 고정(재현성).
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.18
+pydantic==2.10.4

@@ -1,0 +1,37 @@
+# =============================================================
+# compose.dev.yml — 로컬 개발 오버레이
+#   base 의 image: 정의 위에 build: 를 얹어 소스에서 직접 빌드한다.
+#   DB/Storage/Auth 는 전 환경 Supabase 프로젝트를 사용한다(로컬 db 없음).
+#
+# 사용:
+#   docker compose -f deploy/compose/compose.base.yml \
+#                  -f deploy/compose/compose.dev.yml \
+#                  --env-file deploy/env/.env up -d --build
+# =============================================================
+services:
+  gateway:
+    build: ../../services/gateway
+    environment:
+      DEV_DEBUG: "1"                 # /debug/engines 활성(엔진 health 대리 확인)
+      AUTO_DDL: "0"                  # dev 도 Supabase 사용 — 마이그레이션은 deploy/db/migrations
+      AUTH_MODE: dev                 # X-User-Id 허용(로컬 편의). 운영은 strict.
+      STORAGE_BACKEND: supabase
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-skin-images}
+    # ports: ["127.0.0.1:8000:8000"]   # 로컬 디버깅 시에만 (루프백 전용)
+
+  worker:
+    build: ../../services/worker
+    environment:
+      STAGE_DELAY_SEC: "1"           # 단계 사이 1초 지연 → 진행을 눈으로 확인
+      STORAGE_BACKEND: supabase
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-skin-images}
+
+  engine-analysis:
+    build: ../../services/engine-analysis
+
+  engine-prescription:
+    build: ../../services/engine-prescription

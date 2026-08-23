@@ -1,0 +1,451 @@
+Only in patched: __pycache__
+diff -ru orig/migrate_export.sh patched/migrate_export.sh
+--- orig/migrate_export.sh	2026-08-10 00:53:16.775480119 +0000
++++ patched/migrate_export.sh	2026-08-10 00:53:47.893994017 +0000
+@@ -12,6 +12,7 @@
+ #     scp 등 암호화 채널로만 전송하고, 이관 후 원본/전송본을 안전 삭제하세요.
+ # =============================================================
+ set -euo pipefail
++umask 077   # 이 스크립트가 만드는 덤프·번들(.env 비밀 포함)을 0600 으로 생성
+ 
+ PROJECT_DIR="${PROJECT_DIR:-$HOME/projects/webstack}"
+ PG_CONTAINER="${PG_CONTAINER:-postgres}"
+@@ -23,10 +24,30 @@
+ mkdir -p "$WORK"
+ 
+ # .env 에서 DB 계정/이름 로드
+-set -a; source "$PROJECT_DIR/.env"; set +a
++# 주의: 'source'로 읽으면 값에 $, 백틱, 공백 등이 있을 때 셸이 이를 실행/오파싱합니다.
++#       KEY=VALUE 만 안전하게 읽어들입니다(값의 앞뒤 따옴표는 제거).
++load_env() {
++  local file="$1" line key val
++  while IFS= read -r line || [ -n "$line" ]; do
++    case "$line" in ''|'#'*) continue ;; esac        # 빈 줄/주석 건너뜀
++    [ "${line#*=}" = "$line" ] && continue           # '=' 없는 줄 건너뜀
++    key="${line%%=*}"; val="${line#*=}"
++    key="${key#"${key%%[![:space:]]*}"}"             # key 앞쪽 공백 제거
++    key="${key%"${key##*[![:space:]]}"}"             # key 뒤쪽 공백 제거
++    case "$key" in *[!A-Za-z0-9_]*|'') continue ;; esac  # 유효한 변수명만
++    val="${val%$'\r'}"                               # CRLF 대비
++    if [ "${val#\"}" != "$val" ] && [ "${val%\"}" != "$val" ]; then val="${val#\"}"; val="${val%\"}"
++    elif [ "${val#\'}" != "$val" ] && [ "${val%\'}" != "$val" ]; then val="${val#\'}"; val="${val%\'}"; fi
++    export "$key=$val"
++  done < "$file"
++}
++load_env "$PROJECT_DIR/.env"
++: "${POSTGRES_USER:?ERROR: .env 에 POSTGRES_USER 없음}"
++: "${POSTGRES_DB:?ERROR: .env 에 POSTGRES_DB 없음}"
+ 
+ echo "[1/4] PostgreSQL 덤프 (custom 포맷)..."
+-docker exec -t "$PG_CONTAINER" pg_dump -U "$POSTGRES_USER" -Fc "$POSTGRES_DB" > "$WORK/db.dump"
++# 주의: '-t'(TTY)는 출력의 \n 을 \r\n 으로 바꿔 -Fc 바이너리 덤프를 손상시킵니다. 절대 사용 금지.
++docker exec "$PG_CONTAINER" pg_dump -U "$POSTGRES_USER" -Fc "$POSTGRES_DB" > "$WORK/db.dump"
+ 
+ echo "[2/4] 프로젝트 아카이브 (.env 포함, 캐시 제외)..."
+ tar czf "$WORK/project.tgz" \
+@@ -47,6 +68,7 @@
+ 
+ echo "[4/4] 번들 압축..."
+ tar czf "$OUT_DIR/migration_$STAMP.tgz" -C "$WORK" .
++chmod 600 "$OUT_DIR/migration_$STAMP.tgz"   # umask 가 덮어써졌을 경우 대비(.env 비밀 포함)
+ rm -rf "$WORK"
+ 
+ echo
+diff -ru orig/migrate_import.sh patched/migrate_import.sh
+--- orig/migrate_import.sh	2026-08-10 00:53:16.775632017 +0000
++++ patched/migrate_import.sh	2026-08-10 00:54:03.793098759 +0000
+@@ -10,6 +10,7 @@
+ #   DEST=~/projects PG_CONTAINER=postgres ./migrate_import.sh <번들>
+ # =============================================================
+ set -euo pipefail
++umask 077   # 복원되는 .env·임시 파일을 0600 으로 (비밀 노출 방지)
+ 
+ BUNDLE="${1:?사용법: ./migrate_import.sh <migration_YYYYMMDD_HHMMSS.tgz>}"
+ DEST="${DEST:-$HOME/projects}"
+@@ -29,7 +30,24 @@
+ 
+ echo "[2/5] .env 확인..."
+ [ -f "$PROJECT_DIR/.env" ] || { echo "ERROR: .env 없음 — 보안 채널로 전송 필요"; exit 1; }
+-set -a; source "$PROJECT_DIR/.env"; set +a
++# 'source' 대신 KEY=VALUE 만 안전 파싱 (값의 $·백틱·공백을 셸이 실행하지 않도록)
++load_env() {
++  local file="$1" line key val
++  while IFS= read -r line || [ -n "$line" ]; do
++    case "$line" in ''|'#'*) continue ;; esac
++    [ "${line#*=}" = "$line" ] && continue
++    key="${line%%=*}"; val="${line#*=}"
++    key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"
++    case "$key" in *[!A-Za-z0-9_]*|'') continue ;; esac
++    val="${val%$'\r'}"
++    if [ "${val#\"}" != "$val" ] && [ "${val%\"}" != "$val" ]; then val="${val#\"}"; val="${val%\"}"
++    elif [ "${val#\'}" != "$val" ] && [ "${val%\'}" != "$val" ]; then val="${val#\'}"; val="${val%\'}"; fi
++    export "$key=$val"
++  done < "$file"
++}
++load_env "$PROJECT_DIR/.env"
++: "${POSTGRES_USER:?ERROR: .env 에 POSTGRES_USER 없음}"
++: "${POSTGRES_DB:?ERROR: .env 에 POSTGRES_DB 없음}"
+ 
+ echo "[3/5] postgres 먼저 기동 후 healthy 대기..."
+ cd "$PROJECT_DIR"
+diff -ru orig/server_migration_runbook.md patched/server_migration_runbook.md
+--- orig/server_migration_runbook.md	2026-08-10 00:53:16.775769022 +0000
++++ patched/server_migration_runbook.md	2026-08-10 00:59:52.297716352 +0000
+@@ -82,12 +82,14 @@
+ | 적용할 가이드 장 | 대상 서버에서 할 일 | WSL과의 차이 |
+ |---|---|---|
+ | 3장 기본 설정 | 사용자·apt 업데이트·기본 도구·시간대 | systemd는 기본 활성(설정 불필요) |
+-| 5장 SSH 서버 | sshd 이미 동작 → `sshd_config` 강화만 | 22 포트 충돌 이슈 없음 |
++| 5장 SSH 서버 | sshd 이미 동작 → `sshd_config` 강화만 (⚠ `AllowUsers`는 대상 계정 `ubuntu`로 변경) | 22 포트 충돌 이슈 없음 |
+ | 8-B장 Docker | **native docker-ce + compose 설치** | Docker Desktop 아님 |
+ | 20~21장 보안 | fail2ban·ufw·자동 업데이트 | ufw가 1차 방어선(호스트 방화벽) |
+ 
+ 방화벽은 **클라우드 보안그룹**과 **ufw** 두 겹으로 잡되, 최소 포트만 엽니다(7장).
+ 
++> ⚠ 가이드 5-3의 `sshd_config`에는 `AllowUsers coteleaf`가 들어 있습니다. 대상 서버 계정은 보통 `ubuntu`이므로, 그대로 복사하면 **SSH 로그인이 잠깁니다.** 반드시 `AllowUsers ubuntu`(또는 실제 계정)로 바꾸고, 기존 세션을 연 채 새 창에서 접속을 확인한 뒤 원래 세션을 닫으세요.
++
+ ```bash
+ # 대상 서버(native docker 설치는 가이드 8-B장 그대로)
+ $ sudo apt update && sudo apt upgrade -y
+@@ -210,15 +212,18 @@
+ ```
+ 
+ ```powershell
+-# 로컬 PC에서 (원격 대상 서버 대상)
+-local$ .\verify_client.ps1 -RemoteHost your.domain.com -SshUser ubuntu
++# 로컬 PC에서 (원격 대상 서버 대상) — 이관 후에는 -Mode prod
++#   (22/80/443 + https 로 확인, 8000/5432 는 외부 차단이 정상이라 검사 제외)
++local$ .\verify_client.ps1 -RemoteHost your.domain.com -SshUser ubuntu -Mode prod
+ ```
+ 
+ ```bash
+-# 공통 pytest — HTTPS면 443/도메인 기준으로
+-$ TARGET_HOST=your.domain.com SSH_USER=ubuntu HTTP_PORT=443 pytest test_environment.py -v
++# 공통 pytest — 이관 후에는 MODE=prod (HTTPS·도메인 기준, 8000/5432 검사 제외)
++$ TARGET_HOST=your.domain.com SSH_USER=ubuntu MODE=prod pytest test_environment.py -v
+ ```
+ 
++> `-Mode prod` / `MODE=prod` 를 빼고 그대로 돌리면, 방화벽으로 정상 차단된 8000·5432 와 평문 HTTP 검사가 **FAIL(오탐)** 로 뜹니다. 대상 서버는 반드시 prod 모드로 검증하세요.
++
+ **데이터 정합성 스팟체크** (덤프 누락 여부 확인):
+ 
+ ```bash
+diff -ru orig/test_environment.py patched/test_environment.py
+--- orig/test_environment.py	2026-08-10 00:53:16.775349018 +0000
++++ patched/test_environment.py	2026-08-10 00:58:12.007638150 +0000
+@@ -9,16 +9,23 @@
+     pytest test_environment.py -v                                  # localhost(서버 자체)
+     TARGET_HOST=192.168.0.50 SSH_USER=coteleaf pytest -v           # 로컬 → 원격
+ 
++이관 후(외부 호스팅·HTTPS) 검증:  MODE=prod
++    TARGET_HOST=your.domain.com SSH_USER=ubuntu MODE=prod pytest -v
++    → 22/80/443 만 확인하고 HTTPS 로 응답을 봅니다.
++      8000(API)·5432(DB)는 방화벽으로 외부 차단이 '정상'이라(런북 §7-1) 검사에서 제외됩니다.
++
+ 부분 실행 (-k 이름 매칭, 구축 단계 직후 확인용):
+     pytest -k ssh        -v    # SSH 포트 + SSH 로그인만
+     pytest -k nginx      -v    # Nginx 포트 + 응답만        (구축 9장 후)
+-    pytest -k fastapi    -v    # FastAPI 포트 + /docs 만     (구축 10장 후)
+-    pytest -k postgresql -v    # PostgreSQL 포트만           (구축 11장 후)
+-    pytest -k port       -v    # 4개 포트 개방만
++    pytest -k fastapi    -v    # FastAPI 포트 + /docs 만     (구축 9장 후)
++    pytest -k postgresql -v    # PostgreSQL 포트만           (구축 9장 후)
++    pytest -k port       -v    # 포트 개방만
+ 
+ 환경 변수 (모두 선택):
+     TARGET_HOST(기본 localhost), SSH_USER, SSH_PORT(22),
+-    HTTP_PORT(80), API_PORT(8000), PG_PORT(5432)
++    HTTP_PORT(80), HTTPS_PORT(443), API_PORT(8000), PG_PORT(5432),
++    MODE(lan|prod, 기본 lan), SCHEME(http|https, 기본 prod=https/lan=http),
++    WEB_PORT(웹 검사 포트, 기본 prod=443/lan=80)
+ """
+ import os
+ import socket
+@@ -32,12 +39,35 @@
+     requests = None
+ 
+ HOST      = os.environ.get("TARGET_HOST", "localhost")
++MODE      = os.environ.get("MODE", "lan").lower()          # lan | prod
+ SSH_USER  = os.environ.get("SSH_USER", "")
+ SSH_PORT  = int(os.environ.get("SSH_PORT", "22"))
+ HTTP_PORT = int(os.environ.get("HTTP_PORT", "80"))
++HTTPS_PORT = int(os.environ.get("HTTPS_PORT", "443"))
+ API_PORT  = int(os.environ.get("API_PORT", "8000"))
+ PG_PORT   = int(os.environ.get("PG_PORT", "5432"))
+ 
++# prod = 외부 호스팅+HTTPS, lan = WSL2/LAN 검증 환경. SCHEME/WEB_PORT 로 개별 override 가능.
++IS_PROD   = MODE == "prod"
++SCHEME    = os.environ.get("SCHEME", "https" if IS_PROD else "http")
++WEB_PORT  = int(os.environ.get("WEB_PORT", str(HTTPS_PORT if IS_PROD else HTTP_PORT)))
++
++
++def _web_base() -> str:
++    # 표준 포트(80/443)면 URL 에서 포트 생략
++    if (SCHEME, WEB_PORT) in (("http", 80), ("https", 443)):
++        return f"{SCHEME}://{HOST}"
++    return f"{SCHEME}://{HOST}:{WEB_PORT}"
++
++
++# 검사할 포트 목록: prod 는 8000(API)/5432(DB) 외부 차단이 정상 → 제외(런북 §7-1)
++if IS_PROD:
++    _PORTS = [(SSH_PORT, "SSH"), (HTTP_PORT, "HTTP"), (HTTPS_PORT, "HTTPS")]
++else:
++    _PORTS = [(SSH_PORT, "SSH"), (HTTP_PORT, "Nginx"),
++              (API_PORT, "FastAPI"), (PG_PORT, "PostgreSQL")]
++_PORT_IDS = [name for _, name in _PORTS]
++
+ 
+ def _port_open(host: str, port: int, timeout: float = 5.0) -> bool:
+     try:
+@@ -47,28 +77,21 @@
+         return False
+ 
+ 
+-# 파라미터 id(SSH/Nginx/FastAPI/PostgreSQL)로 -k 부분 선택이 가능하도록 ids 지정
+-@pytest.mark.parametrize(
+-    "port,name",
+-    [
+-        (SSH_PORT, "SSH"),
+-        (HTTP_PORT, "Nginx"),
+-        (API_PORT, "FastAPI"),
+-        (PG_PORT, "PostgreSQL"),
+-    ],
+-    ids=["SSH", "Nginx", "FastAPI", "PostgreSQL"],
+-)
++# 파라미터 id(SSH/Nginx/FastAPI/PostgreSQL/HTTP/HTTPS)로 -k 부분 선택이 가능하도록 ids 지정
++@pytest.mark.parametrize("port,name", _PORTS, ids=_PORT_IDS)
+ def test_port_open(port, name):
+     assert _port_open(HOST, port), f"{name} 포트 {port} 연결 실패 (host={HOST})"
+ 
+ 
+ @pytest.mark.skipif(requests is None, reason="requests 미설치")
+ def test_nginx_responds():
+-    r = requests.get(f"http://{HOST}:{HTTP_PORT}", timeout=8)
+-    assert r.status_code < 500, f"Nginx 5xx 응답: {r.status_code}"
++    # lan: http://HOST:80 / prod: https://도메인 (http→https 리다이렉트는 requests 가 자동으로 따라감)
++    r = requests.get(_web_base(), timeout=8)
++    assert r.status_code < 500, f"프런트({_web_base()}) 5xx 응답: {r.status_code}"
+ 
+ 
+ @pytest.mark.skipif(requests is None, reason="requests 미설치")
++@pytest.mark.skipif(IS_PROD, reason="prod: 8000(FastAPI)은 외부 차단이 정상 → 서버 내부에서 확인")
+ def test_fastapi_docs():
+     r = requests.get(f"http://{HOST}:{API_PORT}/docs", timeout=8)
+     assert r.status_code == 200, f"FastAPI /docs 비정상: {r.status_code}"
+diff -ru orig/verify_client.ps1 patched/verify_client.ps1
+--- orig/verify_client.ps1	2026-08-10 00:53:16.775162855 +0000
++++ patched/verify_client.ps1	2026-08-10 00:56:55.834816339 +0000
+@@ -4,15 +4,24 @@
+ #   -Check 로 항목별 부분 실행 가능
+ #
+ # 사용법:
+-#   # 전체
++#   # 전체 (LAN/WSL2 검증 환경 기본값)
+ #   powershell -ExecutionPolicy Bypass -File .\verify_client.ps1 -RemoteHost 192.168.0.50 -SshUser coteleaf
+ #   # SSH 접속만 (로컬 SSH 접속 설정 직후)
+ #   .\verify_client.ps1 -RemoteHost 192.168.0.50 -SshUser coteleaf -Check ssh
+ #   # HTTP 응답만 (외부 접속 구성 직후)
+ #   .\verify_client.ps1 -RemoteHost 192.168.0.50 -Check http
+ #
+-# 주의: 서버가 원격 PC의 WSL2 안에 있으면, 원격 Windows 호스트에서
+-#       netsh portproxy 로 포트를 WSL2 로 포워딩해 두어야 통과함 (문서 10-4).
++#   # 이관 후(외부 호스팅·HTTPS) 서버 검증: -Mode prod
++#   #   → 22/80/443 만 확인하고 HTTPS(https://도메인) 로 응답을 봅니다.
++#   #     8000(API)·5432(DB)는 방화벽으로 외부 차단이 '정상'이라 검사하지 않습니다.
++#   .\verify_client.ps1 -RemoteHost your.domain.com -SshUser ubuntu -Mode prod
++#
++# -Mode:
++#   lan  (기본) : WSL2/LAN 검증 환경. 22/80/8000 포트, 평문 HTTP 로 확인.
++#   prod        : 외부 호스팅+HTTPS. 22/80/443 포트, https 로 확인(런북 §7 포트정책과 일치).
++#
++# 주의: 서버가 원격 PC의 WSL2 안에 있으면(lan), 원격 Windows 호스트에서
++#       netsh portproxy 로 포트를 WSL2 로 포워딩해 두어야 통과함 (문서 10-2).
+ # =============================================================
+ 
+ param(
+@@ -20,10 +29,15 @@
+   [string]$SshUser  = "ubuntu",
+   [int]$SshPort     = 22,
+   [int]$HttpPort    = 80,
++  [int]$HttpsPort   = 443,
+   [int]$ApiPort     = 8000,
++  [ValidateSet("lan","prod")][string]$Mode = "lan",
+   [ValidateSet("all","ping","ports","ssh","http")][string]$Check = "all"
+ )
+ 
++# Windows PowerShell 5.1 은 기본 TLS 가 낮아 Let's Encrypt(HTTPS) 연결이 실패할 수 있음 → TLS1.2 강제
++try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
++
+ $script:pass = 0; $script:fail = 0; $script:warn = 0
+ function Ok($m){ Write-Host "  [PASS] $m" -ForegroundColor Green;  $script:pass++ }
+ function Ng($m){ Write-Host "  [FAIL] $m" -ForegroundColor Red;    $script:fail++ }
+@@ -36,16 +50,22 @@
+   else { Wn "$RemoteHost ping 무응답 (ICMP 차단 가능 — 포트로 확인)" }
+ }
+ 
+-# --- 모듈: ports (구축 5·12장 후) ------------------------------
++# --- 모듈: ports (구축 6·10장 후) ------------------------------
+ function Test-Ports {
+-  Write-Host "`n== [ports] 포트 연결 =="
+-  foreach ($p in @(@{n="SSH";port=$SshPort}, @{n="HTTP(Nginx)";port=$HttpPort}, @{n="API(FastAPI)";port=$ApiPort})) {
++  Write-Host "`n== [ports] 포트 연결 (mode=$Mode) =="
++  if ($Mode -eq "prod") {
++    # 이관 후: 8000(API)/5432(DB)는 외부 차단이 정상(런북 §7-1). 22/80/443 만 확인.
++    $targets = @(@{n="SSH";port=$SshPort}, @{n="HTTP(→HTTPS 리다이렉트)";port=$HttpPort}, @{n="HTTPS";port=$HttpsPort})
++  } else {
++    $targets = @(@{n="SSH";port=$SshPort}, @{n="HTTP(Nginx)";port=$HttpPort}, @{n="API(FastAPI)";port=$ApiPort})
++  }
++  foreach ($p in $targets) {
+     $r = Test-NetConnection -ComputerName $RemoteHost -Port $p.port -WarningAction SilentlyContinue
+     if ($r.TcpTestSucceeded) { Ok "$($p.n) 포트 $($p.port) 열림" } else { Ng "$($p.n) 포트 $($p.port) 닫힘/차단" }
+   }
+ }
+ 
+-# --- 모듈: ssh (구축 5장 후) -----------------------------------
++# --- 모듈: ssh (구축 6장 후) -----------------------------------
+ function Test-Ssh {
+   Write-Host "`n== [ssh] SSH 접속 =="
+   $t = "$SshUser@$RemoteHost"
+@@ -54,10 +74,16 @@
+   else { Ng "SSH 접속 실패: $o" }
+ }
+ 
+-# --- 모듈: http (구축 12장 후) ---------------------------------
++# --- 모듈: http (구축 10장 후) ---------------------------------
+ function Test-Http {
+-  Write-Host "`n== [http] HTTP 서비스 응답 =="
+-  foreach ($u in @("http://${RemoteHost}:${HttpPort}", "http://${RemoteHost}:${ApiPort}/docs")) {
++  Write-Host "`n== [http] HTTP 서비스 응답 (mode=$Mode) =="
++  if ($Mode -eq "prod") {
++    # HTTPS 도메인 기준. http:// 는 →https 리다이렉트를 따라가 200 이면 정상. 8000 은 외부 차단이라 확인 안 함.
++    $urls = @("https://${RemoteHost}", "http://${RemoteHost}")
++  } else {
++    $urls = @("http://${RemoteHost}:${HttpPort}", "http://${RemoteHost}:${ApiPort}/docs")
++  }
++  foreach ($u in $urls) {
+     try { $r = Invoke-WebRequest -Uri $u -TimeoutSec 8 -UseBasicParsing; Ok "$u -> HTTP $($r.StatusCode)" }
+     catch {
+       $sc = $_.Exception.Response.StatusCode.value__
+@@ -67,7 +93,7 @@
+ }
+ 
+ Write-Host "============================================================"
+-Write-Host " 원격 서버 검증 [$Check]: $RemoteHost  ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))"
++Write-Host " 원격 서버 검증 [$Check / mode=$Mode]: $RemoteHost  ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))"
+ Write-Host "============================================================"
+ 
+ switch ($Check) {
+diff -ru orig/verify_server.sh patched/verify_server.sh
+--- orig/verify_server.sh	2026-08-10 00:53:16.774908810 +0000
++++ patched/verify_server.sh	2026-08-10 00:54:58.710158473 +0000
+@@ -35,8 +35,19 @@
+ # 공통 헬퍼 -----------------------------------------------------
+ _container_up() { docker ps --format '{{.Names}}' 2>/dev/null | grep -qi "$1"; }
+ _http_code()    { curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null || echo 000; }
++# HTTP 판정: 000=무응답(WARN). strict=1 이면 200만 PASS, 아니면 <500 을 PASS.
++# (기존 '!= 000' 방식은 502/500 도 PASS 로 처리해 pytest(<500,==200)와 어긋났음)
++_http_report() {  # $1=라벨  $2=URL  [$3=strict]
++  local c; c=$(_http_code "$2")
++  if [ "$c" = 000 ]; then warn "$1 무응답"; return; fi
++  if [ "${3:-0}" = 1 ]; then
++    [ "$c" = 200 ] && ok "$1 HTTP $c" || ng "$1 HTTP $c (200 아님)"
++  else
++    [ "$c" -lt 500 ] && ok "$1 HTTP $c" || ng "$1 HTTP $c (5xx)"
++  fi
++}
+ 
+-# --- 모듈: base (구축 1~4장 후) --------------------------------
++# --- 모듈: base (구축 3장 후) ----------------------------------
+ check_base() {
+   section "[base] OS / 개발도구 / Python"
+   [ -f /etc/os-release ] && ok "OS: $(. /etc/os-release; echo "$PRETTY_NAME")" || ng "/etc/os-release 없음"
+@@ -47,7 +58,7 @@
+   check_cmd python3 python3; check_cmd pip3 pip3
+ }
+ 
+-# --- 모듈: ssh (구축 4장 후) -----------------------------------
++# --- 모듈: ssh (구축 5장 후) -----------------------------------
+ check_ssh() {
+   section "[ssh] SSH 서버"
+   if pgrep -x sshd >/dev/null 2>&1; then ok "sshd 프로세스 실행 중"
+@@ -56,7 +67,7 @@
+   ss -tlnp 2>/dev/null | grep -q ':22 ' && ok "22번 포트 LISTEN" || warn "22번 포트 미검출"
+ }
+ 
+-# --- 모듈: github (구축 6~7장 후) ------------------------------
++# --- 모듈: github (구축 7장 후) --------------------------------
+ check_github() {
+   section "[github] GitHub SSH 인증 (계정별)"
+   for host in github.com-coteleafdev github.com-skygoldlee github.com; do
+@@ -84,17 +95,17 @@
+ check_nginx() {
+   section "[nginx] Nginx"
+   _container_up nginx && ok "nginx 컨테이너 실행 중" || warn "nginx 컨테이너 미검출 (명명 규칙 다르면 무시)"
+-  c=$(_http_code http://localhost:80); [ "$c" != 000 ] && ok "Nginx(80) HTTP $c" || warn "Nginx(80) 무응답"
++  _http_report "Nginx(80)" http://localhost:80
+ }
+ 
+-# --- 모듈: fastapi (구축 10장 후) ------------------------------
++# --- 모듈: fastapi (구축 9장 후) -------------------------------
+ check_fastapi() {
+   section "[fastapi] FastAPI"
+   _container_up fastapi && ok "fastapi 컨테이너 실행 중" || warn "fastapi 컨테이너 미검출"
+-  c=$(_http_code http://localhost:8000/docs); [ "$c" != 000 ] && ok "FastAPI(8000/docs) HTTP $c" || warn "FastAPI(8000) 무응답"
++  _http_report "FastAPI(8000/docs)" http://localhost:8000/docs 1
+ }
+ 
+-# --- 모듈: postgres (구축 11장 후) -----------------------------
++# --- 모듈: postgres (구축 9장 후) ------------------------------
+ check_postgres() {
+   section "[postgres] PostgreSQL"
+   _container_up postgres && ok "postgres 컨테이너 실행 중" || warn "postgres 컨테이너 미검출"
+diff -ru orig/windows11_ubuntu_server_setup.md patched/windows11_ubuntu_server_setup.md
+--- orig/windows11_ubuntu_server_setup.md	2026-08-10 00:53:16.773970206 +0000
++++ patched/windows11_ubuntu_server_setup.md	2026-08-10 00:59:20.791203536 +0000
+@@ -240,6 +240,8 @@
+ AllowUsers coteleaf
+ ```
+ 
++> ⚠ `AllowUsers`는 **실제 로그인 계정명과 반드시 일치**해야 합니다. 여기 값(`coteleaf`)을 그대로 둔 채 다른 계정(예: 외부 호스팅 서버의 기본 계정 `ubuntu`)으로 접속하면 **자기 자신이 차단되어 SSH 로그인이 막힙니다.** 이관 런북대로 대상 서버에 이 하드닝을 재적용할 때는 `AllowUsers ubuntu`처럼 그 서버의 계정으로 바꾸세요(여러 계정이면 공백으로 나열). 변경 후에는 **기존 세션을 유지한 채** 새 창에서 접속을 확인하고 나서 원래 세션을 닫습니다.
++
+ ### 5-4. 서비스 기동
+ 
+ systemd가 켜져 있으면:
+@@ -760,6 +762,9 @@
+ local$ .\verify_client.ps1 -RemoteHost 192.168.0.50 -SshUser coteleaf -Check ssh
+ # HTTP 응답만 (10장 직후)
+ local$ .\verify_client.ps1 -RemoteHost 192.168.0.50 -Check http
++
++# 이관 후(외부 호스팅·HTTPS) 서버 검증: -Mode prod (22/80/443 + https, 8000/5432 검사 제외)
++local$ .\verify_client.ps1 -RemoteHost your.domain.com -SshUser ubuntu -Mode prod
+ ```
+ 
+ | 완료한 구축 단계 | 실행 명령 | 검사 내용 |
+@@ -908,7 +913,8 @@
+ STAMP=$(date +%Y%m%d_%H%M%S)
+ 
+ # custom 포맷(-Fc): 압축 + 선택적 복구 가능
+-docker exec -t postgres pg_dump -U appuser -Fc appdb > "$BACKUP_DIR/appdb_$STAMP.dump"
++# 주의: '-t'(TTY)는 출력의 \n 을 \r\n 으로 바꿔 바이너리 덤프를 손상시키므로 절대 쓰지 않습니다.
++docker exec postgres pg_dump -U appuser -Fc appdb > "$BACKUP_DIR/appdb_$STAMP.dump"
+ 
+ # 보관기간 초과분 삭제
+ find "$BACKUP_DIR" -name 'appdb_*.dump' -mtime +$RETAIN_DAYS -delete
+@@ -1048,7 +1054,7 @@
+ $ sudo unattended-upgrade --dry-run --debug
+ ```
+ 
+-> systemd의 `apt-daily.timer`가 트리거하므로, WSL이 상시 떠 있는(16장) 환경에서 정상 동작합니다. 커널·보안 패치 후에는 `wsl --shutdown` 재기동을 권장합니다.
++> systemd의 `apt-daily.timer`가 트리거하므로, WSL이 상시 떠 있는(16장) 환경에서 정상 동작합니다. 다만 이는 **userland 패키지(라이브러리·데몬)** 갱신입니다. WSL2 커널은 apt가 아니라 Windows 쪽(`microsoft-standard-WSL2`, `wsl --update`)에서 오므로, 여기서 커널이 바뀌지는 않습니다. 중요한 라이브러리 패치 후에는 관련 컨테이너/서비스 재기동(필요 시 `wsl --shutdown`)으로 반영을 확실히 하세요. 커널 자체 업데이트는 별도로 `wsl --update`를 씁니다.
+ 
+ ## 22. HTTPS / TLS
+ 
+@@ -1084,6 +1090,8 @@
+ 
+ 도메인만 맞으면 Let's Encrypt 인증서를 자동 발급·갱신합니다.
+ 
++> ⚠ **프런트 프록시는 하나만.** 부록의 최종 `docker-compose.yml`에는 `nginx` 서비스가 `80:80`을 물고 있습니다. 여기에 Caddy(`80:80`/`443:443`)를 그대로 추가하면 **80 포트 충돌**로 한쪽이 기동에 실패합니다. Caddy를 프런트로 쓰기로 했다면 부록 compose에서 **`nginx` 서비스를 제거**(Caddy가 `fastapi:8000`으로 직접 리버스 프록시)하거나, Nginx를 유지하려면 Caddy 없이 22-B(certbot)로 가세요. 멀티 프로젝트(27장)에서 Nginx를 내부 라우터로 남기고 싶다면 Nginx의 `ports`에서 `80:80`을 빼 **외부 노출은 Caddy만** 담당하게 합니다.
++
+ ### 22-B. Nginx + certbot (대안)
+ 
+ 기존 Nginx를 유지하려면 certbot으로 인증서를 발급하고 443 server 블록에 적용합니다. Caddy보다 설정이 많으므로, 위 Caddy를 우선 검토하고 세부가 필요하면 별도로 구성합니다.

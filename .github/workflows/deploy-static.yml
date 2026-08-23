@@ -1,0 +1,50 @@
+# =============================================================
+# homepage / devpage 레포용 — 정적 사이트 배포(빌드 없음)
+#  .github/workflows/deploy.yml 로 복사.
+#  동작: self-hosted 러너가 서버의 서빙 디렉터리로 소스를 동기화 → 재시작 불필요
+#        (nginx 가 bind-mount 를 라이브로 서빙).
+#
+#  ★ 서비스별로 아래 SITE 값만 바꾸면 됨: homepage 또는 devpage
+# =============================================================
+name: deploy-static
+
+on:
+  push:
+    branches: [develop, main]
+    paths: [ 'apps/**' ]    # (monorepo) 변경 서비스만 빌드
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  SITE: homepage          # ← devpage 레포에서는 devpage 로
+
+jobs:
+  staging:
+    if: github.ref_name == 'develop'
+    runs-on: [self-hosted, staging]      # WSL 러너
+    steps:
+      - uses: actions/checkout@v4
+      - name: 서빙 디렉터리로 동기화(삭제 반영)
+        run: |
+          set -euo pipefail
+          DEST="$HOME/ops/sites/${SITE}"
+          mkdir -p "$DEST"
+          rsync -a --delete --exclude '.git' ./ "$DEST"/
+          echo "synced -> $DEST (재시작 불필요)"
+
+  production:
+    if: github.ref_name == 'main'
+    runs-on: [self-hosted, production]   # VPS 러너
+    environment: production              # ← 승인 게이트(선택): 리뷰어 지정 시 수동 승인
+    steps:
+      - uses: actions/checkout@v4
+      - name: 서빙 디렉터리로 동기화(삭제 반영)
+        run: |
+          set -euo pipefail
+          DEST="$HOME/ops/sites/${SITE}"
+          mkdir -p "$DEST"
+          rsync -a --delete --exclude '.git' ./ "$DEST"/
+          echo "synced -> $DEST"

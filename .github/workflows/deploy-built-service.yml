@@ -1,0 +1,101 @@
+# =============================================================
+# gateway / worker — "서버에서 빌드"하는 가벼운 서비스 (monorepo)
+#  동작: self-hosted 러너가 서버에서 이미지를 직접 빌드(sha 태그) →
+#        (gateway만) DB 마이그레이션(expand-only) →
+#        ops 의 deploy.sh 로 헬스체크 게이트 + 롤백 배포.
+#  레지스트리 불필요(같은 도커 호스트에 이미지가 생기므로).
+#
+#  ★ C5-2: 변경 경로로 SERVICE 분기.
+#     - gateway 잡은 services/gateway/** 또는 packages/** 변경 시에만 실행
+#     - worker  잡은 services/worker/**  또는 packages/** 변경 시에만 실행
+#     (packages/** 는 공통 계약 패키지 → 두 서비스 모두 재배포)
+#     - workflow_dispatch 는 두 서비스 모두 배포
+# =============================================================
+name: deploy-built-service
+
+on:
+  push:
+    branches: [develop, main]
+    paths: [ 'services/gateway/**', 'services/worker/**', 'packages/**' ]    # (monorepo) 변경 서비스만 빌드
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref_name }}-${{ github.event.repository.name }}
+  cancel-in-progress: false          # 배포는 도중 취소하지 않음
+
+jobs:
+  # ---- (0) 어떤 서비스가 바뀌었는지 감지 ----
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      gateway: ${{ steps.filter.outputs.gateway }}
+      worker:  ${{ steps.filter.outputs.worker }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            gateway:
+              - 'services/gateway/**'
+              - 'packages/**'
+            worker:
+              - 'services/worker/**'
+              - 'packages/**'
+
+  deploy:
+    needs: changes
+    strategy:
+      fail-fast: false               # 한 서비스 배포 실패가 다른 서비스 배포를 취소하지 않음
+      matrix:
+        service: [gateway, worker]
+    runs-on: ${{ github.ref_name == 'main' && fromJSON('["self-hosted","production"]') || fromJSON('["self-hosted","staging"]') }}
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    env:
+      SERVICE: ${{ matrix.service }}
+    steps:
+      # push 는 변경된 서비스만, 수동 실행(workflow_dispatch)은 둘 다
+      - name: 변경 서비스 여부 확인
+        id: gate
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            CHANGED="${{ needs.changes.outputs[matrix.service] }}"
+            echo "run=${CHANGED}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - name: 서버에서 이미지 빌드(sha 태그)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          TAG="sl_${SERVICE}:${GITHUB_SHA::12}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          docker build -t "$TAG" "services/${SERVICE}"
+
+      # ---- (P0) DB 마이그레이션 — gateway 만, deploy 이전 ----
+      #  · 새 이미지로 스키마를 head 까지 "전진"만 한다(expand-contract 의 expand).
+      #  · 반드시 하위호환이어야: 이후 이미지 롤백(v2→v1) 시에도 구버전 코드가
+      #    새 스키마에서 정상 동작한다. (03_DB_MIGRATION_ROLLBACK.md)
+      #  · 마이그레이션이 실패하면 여기서 잡이 실패 → deploy 스텝에 도달하지 않음
+      #    (스키마 깨진 채 이미지 교철되는 사고 방지).
+      - name: DB 마이그레이션 (expand-only)
+        if: steps.gate.outputs.run == 'true' && env.SERVICE == 'gateway'
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --env-file "$HOME/ops/.env" \
+            --network skinlens_appnet \
+            "$TAG" alembic upgrade head
+
+      - name: 헬스체크 게이트 + 롤백 배포
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          ENVN="${{ github.ref_name == 'main' && 'production' || 'staging' }}"
+          "$HOME/ops/deploy.sh" --service "$SERVICE" --image "$TAG" --env "$ENVN"
+          # deploy.sh 가 실패(비정상)면 자동 롤백 후 non-zero → 이 스텝도 실패로 표시

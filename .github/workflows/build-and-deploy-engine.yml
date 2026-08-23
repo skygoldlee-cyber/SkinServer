@@ -1,0 +1,150 @@
+# =============================================================
+# engine-analysis / engine-prescription — 무거운 이미지 (monorepo)
+#  동작: (1) GitHub-hosted 러너에서 빌드 → GHCR push  (서버 리소스 안 씀)
+#        (2) self-hosted 러너(서버)가 GHCR pull → deploy.sh 로 헬스 게이트+롤백
+#
+#  사전: 서버가 GHCR 를 pull 할 수 있어야 함(비공개면 login 스텝이 처리).
+#
+#  ★ C5-2: 변경 경로로 SERVICE 분기.
+#     - engine-analysis     잡은 services/engine-analysis/**     또는 packages/** 변경 시
+#     - engine-prescription 잡은 services/engine-prescription/** 또는 packages/** 변경 시
+#     (packages/** 는 공통 계약 패키지 → 두 엔진 모두 재배포)
+#     - workflow_dispatch 는 두 엔진 모두 배포
+# =============================================================
+name: build-and-deploy-engine
+
+on:
+  push:
+    branches: [develop, main]
+    paths: [ 'services/engine-analysis/**', 'services/engine-prescription/**', 'packages/**' ]    # (monorepo) 변경 서비스만 빌드
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref_name }}-${{ github.event.repository.name }}
+  cancel-in-progress: false
+
+jobs:
+  # ---- (0) 어떤 엔진이 바뀌었는지 감지 ----
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      engine-analysis:     ${{ steps.filter.outputs.engine-analysis }}
+      engine-prescription: ${{ steps.filter.outputs.engine-prescription }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            engine-analysis:
+              - 'services/engine-analysis/**'
+              - 'packages/**'
+            engine-prescription:
+              - 'services/engine-prescription/**'
+              - 'packages/**'
+
+  # ---- (1) CI 빌드 → GHCR push (GPU 불필요: 빌드만) ----
+  build:
+    needs: changes
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: engine-analysis
+            image_name: skinlens-engine-analysis
+          - service: engine-prescription
+            image_name: skinlens-engine-prescription
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      # push 는 변경된 엔진만, 수동 실행(workflow_dispatch)은 둘 다
+      - name: 변경 엔진 여부 확인
+        id: gate
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            CHANGED="${{ needs.changes.outputs[matrix.service] }}"
+            echo "run=${CHANGED}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - name: GHCR 로그인
+        if: steps.gate.outputs.run == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 태그 계산
+        if: steps.gate.outputs.run == 'true'
+        id: meta
+        run: |
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"     # 소문자 필수(GHCR)
+          REF="ghcr.io/${OWNER}/${{ matrix.image_name }}:${GITHUB_SHA::12}"
+          echo "image=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: 빌드 & 푸시
+        if: steps.gate.outputs.run == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---- (2) 서버에서 pull → 헬스 게이트 + 롤백 ----
+  deploy:
+    needs: [changes, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: engine-analysis
+            image_name: skinlens-engine-analysis
+          - service: engine-prescription
+            image_name: skinlens-engine-prescription
+    runs-on: ${{ github.ref_name == 'main' && fromJSON('["self-hosted","production"]') || fromJSON('["self-hosted","staging"]') }}
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: 변경 엔진 여부 확인
+        id: gate
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            CHANGED="${{ needs.changes.outputs[matrix.service] }}"
+            echo "run=${CHANGED}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: GHCR 로그인(서버에서 pull 위해)
+        if: steps.gate.outputs.run == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: pull + 헬스 게이트 배포
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          ENVN="${{ github.ref_name == 'main' && 'production' || 'staging' }}"
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          IMAGE="ghcr.io/${OWNER}/${{ matrix.image_name }}:${GITHUB_SHA::12}"
+          "$HOME/ops/deploy.sh" --service "${{ matrix.service }}" --image "$IMAGE" --env "$ENVN" --pull

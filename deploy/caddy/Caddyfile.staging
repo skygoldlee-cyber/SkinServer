@@ -1,0 +1,35 @@
+# =============================================================
+# Caddyfile.staging — (P1 #3) 스테이징 TLS 종단 (★ 도메인/이메일을 실제 값으로 교체)
+#
+#  - 운영 Caddyfile 과 동일한 구조지만, 인증서는 Let's Encrypt *staging* CA 를 쓴다.
+#    → 발급 rate limit 을 소모하지 않고 TLS 경로를 검증할 수 있다.
+#    → staging CA 인증서는 브라우저가 신뢰하지 않으므로 경고가 뜨는 게 정상.
+#      (목적은 "평문 전송 차단"이지 신뢰된 인증서가 아님.)
+#  - 사용: compose.staging-tls.yml 이 이 파일을 /etc/caddy/Caddyfile 로 마운트한다.
+#  - 웹 정적 표면은 Vercel 로 이관되었으므로, 여기서는 staging-api.example.com 만 프록시.
+# =============================================================
+
+{
+	email admin@example.com          # ← 실제 관리자 메일(만료 알림·ACME)
+	# ★ staging CA — 발급 한도 소모 없이 TLS 검증. 운영은 이 줄을 빼고 prod CA(기본값) 사용.
+	acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+# 스테이징 AI Server API 도메인(예: staging-api.example.com). 실제 DNS 가 이 박스를 가리켜야 ACME 통과.
+staging-api.example.com {
+	encode gzip
+
+	reverse_proxy gateway:8000 {
+		header_up X-Forwarded-Proto https
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}

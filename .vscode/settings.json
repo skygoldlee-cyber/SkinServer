@@ -1,0 +1,7 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "python-envs.terminal.autoActivationType": "off",
+    "python.terminal.activateEnvironment": false,
+    "python.analysis.typeCheckingMode": "off",
+    "python.analysis.diagnosticMode": "workspace"
+}

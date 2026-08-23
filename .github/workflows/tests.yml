@@ -1,0 +1,54 @@
+# 모노레포 테스트 — 단위(파트별) + 통합(임시 Postgres). GitHub-hosted 러너.
+name: tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+
+jobs:
+  unit:
+    name: unit (파트별)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: opencv 런타임 라이브러리
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-0
+      - name: 의존성 설치
+        run: pip install -r requirements-dev.txt
+      - name: 단위 테스트
+        run: pytest -m "not integration"
+
+  integration:
+    name: integration (임시 Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: appuser
+          POSTGRES_PASSWORD: app_pw
+          POSTGRES_DB: appdb
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U appuser -d appdb"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://appuser:app_pw@localhost:5432/appdb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: opencv 런타임 라이브러리
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-0
+      - name: 의존성 설치
+        run: pip install -r requirements-dev.txt
+      - name: 통합 테스트 (gateway → worker → prescriptions)
+        run: pytest -m integration

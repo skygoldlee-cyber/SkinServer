@@ -1,0 +1,50 @@
+# =============================================================
+# compose.staging-tls.yml — (P1 #3) 스테이징 TLS 오버레이 (opt-in)
+#
+#  목적: 스테이징에서 AI Server API 가 HTTP 평문으로 노출되는 것을 막는다.
+#        compose.tls.yml(운영)과 구조는 같지만, 인증서는 Let's Encrypt *staging* CA 를
+#        써서 rate limit / 발급 한도를 소모하지 않는다(브라우저 경고는 정상).
+#
+#  구조:
+#    Internet :80/:443 → caddy(ACME staging CA, 자동 인증서) → gateway:8000
+#
+#  사용 (도메인/이메일이 스테이징 DNS 를 가리킬 때만):
+#    docker compose -f deploy/compose/compose.base.yml \
+#                   -f deploy/compose/compose.staging.yml \
+#                   -f deploy/compose/compose.staging-tls.yml \
+#                   --env-file deploy/env/.env --env-file deploy/env/.env.images up -d
+#
+#  준비물:
+#   - 스테이징 도메인의 DNS A 레코드가 이 박스를 가리켜야 ACME 통과.
+#   - deploy/caddy/Caddyfile.staging 의 도메인/이메일을 실제 값으로 교체.
+#
+#  ※ 도메인이 없는 순수 로컬 WSL 개발이면 이 파일 없이 HTTP(8000) 직결을 유지한다.
+#     (로컬호스트/사설망에만 노출되므로 위험이 낮음 — 그게 현행 기본값.)
+# =============================================================
+
+services:
+  caddy:
+    image: caddy:2
+    container_name: sl_caddy_staging
+    depends_on: [gateway]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # 스테이징 전용 Caddyfile — ACME staging CA 사용(운영 Caddyfile 과 분리).
+      - ../caddy/Caddyfile.staging:/etc/caddy/Caddyfile:ro
+      - caddy_staging_data:/data
+      - caddy_staging_config:/config
+    networks: [appnet]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+    restart: unless-stopped
+
+  gateway:
+    # Caddy 가 host 의 80/443 을 소유하므로 gateway 는 host 포트를 열지 않는다.
+    ports: !reset []
+
+volumes:
+  caddy_staging_data:
+  caddy_staging_config:
